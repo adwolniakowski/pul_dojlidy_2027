@@ -234,7 +234,7 @@ class BrowserTests(unittest.TestCase):
             expect(label).to_have_css("border-top-width", "0px")
         expect(self.page.locator("#layers-panel legend")).to_have_text(["01 / Podkład mapy", "02 / Dane leśne"])
         forest = self.page.locator("#layers-panel fieldset").nth(1)
-        expect(forest.locator("#bdl-visible, #mbdl-visible, #plan-visible")).to_have_count(3)
+        expect(forest.locator("#bdl-visible, #mbdl-visible, #plan-visible, #lozfs-visible")).to_have_count(4)
         self.assert_boundary_visible(self.page)
         expect(forest.locator("small")).to_have_text(["Stan na 2026 rok", "Oddziały i wydzielenia; widoczne po przybliżeniu", "Plan rębni"])
         expect(forest.locator("label:has(#plan-visible) small")).to_have_text("Plan rębni")
@@ -249,6 +249,248 @@ class BrowserTests(unittest.TestCase):
             "OSM: © OpenStreetMap contributors.",
             "Ortofotomapa: GUGiK / Geoportal.",
         ])
+
+    def lozfs_collections(self):
+        return [json.loads((ROOT / f"web/layers/lozfs-{name}.geojson").read_bytes())
+                for name in ("proposed", "established")]
+
+    def lozfs_overlap(self):
+        # Only the intersection fixture skips invalid shapes; rendering must retain all 42.
+        for collection in self.lozfs_collections():
+            for feature in collection["features"]:
+                geometry = shape(feature["geometry"])
+                if not geometry.is_valid:
+                    continue
+                for i in self.trees["rozplan"].query(geometry, predicate="intersects"):
+                    plan_part = geometry.intersection(self.geometries["rozplan"][int(i)])
+                    for j in self.trees["bdl"].query(plan_part, predicate="intersects"):
+                        common = plan_part.intersection(self.geometries["bdl"][int(j)])
+                        if common.area > 1e-9:
+                            return common.representative_point(), self.features["rozplan"][int(i)]
+        self.fail("No published LoZFS/BDL/BULIG interior intersection")
+
+    def assert_lozfs_rendered(self, page):
+        expect(page.locator(".leaflet-lozfs-pane > svg")).to_have_count(1)
+        expect(page.locator(".leaflet-lozfs-pane path")).to_have_count(42)
+        expect(page.locator("#lozfs-hatch")).to_have_count(1)
+        pattern = page.locator("#lozfs-hatch")
+        for attribute, value in (("patternUnits", "userSpaceOnUse"), ("width", "8"),
+                                 ("height", "8"), ("patternTransform", "rotate(45)")):
+            expect(pattern).to_have_attribute(attribute, value)
+        line = pattern.locator("line")
+        for attribute, value in (("stroke", "#287a3c"), ("stroke-width", "1.4"),
+                                 ("stroke-opacity", "0.8"), ("x1", "0"), ("x2", "0"),
+                                 ("y1", "0"), ("y2", "8")):
+            expect(line).to_have_attribute(attribute, value)
+        self.assertTrue(page.evaluate("""() => {
+          const layers = Object.values(__testMap._layers);
+          const groups = layers.filter(l => l instanceof L.GeoJSON && l.options.pane === 'lozfsPane');
+          const parent = layers.filter(l => l instanceof L.LayerGroup && !(l instanceof L.GeoJSON) &&
+            l.getLayers().length === 2 && l.getLayers().every(c => groups.includes(c)));
+          const renderer = groups[0]?.options.renderer;
+          return groups.length === 2 && parent.length === 1 && renderer instanceof L.SVG &&
+            renderer.options.pane === 'lozfsPane' &&
+            groups.every((g, i) => g.options.renderer === renderer && !g.options.onEachFeature &&
+              g.options.interactive === false && g.getLayers().length === (i === 0 ? 34 : 8) &&
+              g.getLayers().every(c => {
+                const p = c._path;
+                return c._renderer === renderer && c.options.pane === 'lozfsPane' &&
+                  c.options.interactive === false && !c.getPopup() && !c.getTooltip() &&
+                  !c.listens('mouseover') && !c.listens('mouseout') && !c.listens('click') &&
+                  !p.classList.contains('leaflet-interactive') &&
+                  getComputedStyle(p).pointerEvents === 'none' &&
+                  p.getAttribute('stroke') === '#287a3c' &&
+                  p.getAttribute('fill') === 'url(#lozfs-hatch)' &&
+                  p.getAttribute('fill-opacity') === '1' &&
+                  c.options.dashArray === (i === 0 ? '6 4' : null) &&
+                  (i === 0 ? p.getAttribute('stroke-dasharray') === '6 4' : !p.hasAttribute('stroke-dasharray'));
+              }));
+        }"""), "Both complete LoZFS datasets must share one noninteractive SVG hatch renderer")
+        self.assertTrue(page.evaluate("""() => {
+          const pane = name => getComputedStyle(__testMap.getPane(name));
+          const groups = Object.values(__testMap._layers).filter(l => l instanceof L.GeoJSON);
+          const core = groups.filter(g => g.getLayers().some(c =>
+            ['bdl', 'rozplan'].includes(c.feature?.properties.source)) && g.options.pane !== 'highlightPane');
+          const highlights = groups.filter(g => g.options.pane === 'highlightPane');
+          return pane('overlayPane').zIndex === '400' && pane('lozfsPane').zIndex === '410' &&
+            pane('lozfsPane').pointerEvents === 'none' && pane('highlightPane').zIndex === '420' &&
+            pane('highlightPane').pointerEvents === 'none' && core.length === 2 &&
+            core.every(g => g.getLayers().every(c => c._renderer instanceof L.Canvas &&
+              c._renderer.options.pane === 'overlayPane')) && highlights.length === 3 &&
+            highlights.every(g => g.options.interactive === false &&
+              g.getLayers().every(c => c.options.interactive === false && c.options.pane === 'highlightPane'));
+        }"""), "Canvas core layers must stay below hatch, with noninteractive highlights above")
+        self.assert_boundary_visible(page)
+
+    def test_lozfs_svg_hatch_complete_datasets_toggle_pan_zoom_desktop_mobile(self):
+        """LOZFS-01: actual SVG paths, hatch, layer order and noninteractive styling."""
+        collections = self.lozfs_collections()
+        self.assertEqual([len(c["features"]) for c in collections], [34, 8])
+        self.assertFalse(shape(collections[0]["features"][3]["geometry"]).is_valid)
+        point, _ = self.lozfs_overlap()
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                checkbox = page.locator("#lozfs-visible")
+                expect(checkbox).not_to_be_checked()
+                expect(page.locator("#lozfs-legend")).to_be_hidden()
+                expect(checkbox).to_be_enabled()
+                expect(page.locator(".leaflet-lozfs-pane path")).to_have_count(0)
+                checkbox.check()
+                self.click_point(point, page)
+                page.evaluate("__testMap.closePopup()")
+                expect(page.locator(".leaflet-popup")).to_have_count(0)
+                self.assert_lozfs_rendered(page)
+                groups = page.evaluate("""() => Object.values(__testMap._layers)
+                  .filter(g => g instanceof L.GeoJSON && g.options.pane === 'lozfsPane')
+                  .map(g => ({features: g.getLayers().map(c => c.feature)}))""")
+                for actual, original in zip(groups, collections):
+                    self.assertEqual(actual["features"], original["features"])
+                pattern = page.locator("#lozfs-hatch").element_handle()
+                styles = page.locator(".leaflet-lozfs-pane path").evaluate_all("els => els.map(e => e.outerHTML)")
+                pixel = page.evaluate("""() => {
+                  const r = document.querySelector('#map').getBoundingClientRect();
+                  return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+                }""")
+                page.mouse.move(pixel["x"], pixel["y"])
+                self.assertEqual(page.locator(".leaflet-lozfs-pane path").evaluate_all(
+                    "els => els.map(e => e.outerHTML)"), styles)
+                expect(page.locator(".leaflet-tooltip, .leaflet-popup")).to_have_count(0)
+                for action in ("off", "on", "pan", "zoom"):
+                    if action == "off":
+                        checkbox.uncheck()
+                        expect(page.locator(".leaflet-lozfs-pane path")).to_have_count(0)
+                        expect(page.locator("#lozfs-legend")).to_be_hidden()
+                        continue
+                    if action == "on":
+                        checkbox.check()
+                    elif action == "pan":
+                        page.evaluate("__testMap.panBy([35, 20], {animate: false})")
+                    else:
+                        page.evaluate("__testMap.setZoom(16, {animate: false})")
+                    self.wait_map_idle(page)
+                    self.assert_lozfs_rendered(page)
+                    self.assertTrue(pattern.evaluate("el => el.isConnected && el === document.querySelector('#lozfs-hatch')"))
+                expect(page.locator("#lozfs-legend")).to_be_visible()
+                expect(page.locator("#lozfs-legend > span")).to_have_text(["Proponowane", "Ustalone"])
+                for sample in page.locator("#lozfs-legend i").all():
+                    expect(sample).to_have_css("border-top-color", "rgb(40, 122, 60)")
+                    self.assertIn("repeating-linear-gradient", sample.evaluate("el => getComputedStyle(el).backgroundImage"))
+                self.assert_no_overflow(page)
+                page.screenshot(path=str(SCREENSHOTS / f"pul-{'mobile' if mobile else 'desktop'}-lozfs.png"), full_page=True)
+                pattern.dispose()
+
+    def test_lozfs_click_through_and_toggle_preserves_popup_lists_filters_and_view(self):
+        """LOZFS-01/SEL-03/05/06: hatch adds no hits and toggling touches no core state."""
+        page = self.page
+        point, plan = self.lozfs_overlap()
+        expect(page.locator("#lozfs-visible")).to_be_enabled()
+        self.load_entries([plan], ["LoZFS must preserve this note"], page)
+        expect(page.locator("#lozfs-visible")).to_be_enabled()
+        self.click_point(point, page)
+        before_hits = page.locator(".result-button").all_text_contents()
+        expect(page.locator(".popup section")).to_have_count(2)
+        expect(page.locator(".result-button")).to_have_count(
+            len(self.hits(point, "bdl")) + len(self.hits(point, "rozplan")))
+        page.locator("#lozfs-visible").check()
+        self.click_point(point, page)
+        self.assertEqual(page.locator(".result-button").all_text_contents(), before_hits)
+        page.locator("#no-types").click()
+        page.locator(f'[data-type="{plan["properties"]["type"]}"]').check()
+        page.locator("#color-mode").select_option("type")
+        page.locator('[name=base][value=ortho]').check()
+        self.click_point(point, page)
+        self.choose(plan, page)
+        popup = page.locator(".leaflet-popup").element_handle()
+        saved = self.saved(page)
+        snapshot = """() => ({
+          center: __testMap.getCenter(), zoom: __testMap.getZoom(),
+          objects: document.querySelector('#objects-list').innerHTML,
+          notes: document.querySelector('#entries').innerHTML,
+          popup: document.querySelector('.leaflet-popup').innerHTML,
+          filters: [...document.querySelectorAll('[data-type]')].map(e => [e.dataset.type, e.checked]),
+          controls: [...document.querySelectorAll('[name=base], #bdl-visible, #mbdl-visible, #plan-visible')].map(e => e.checked),
+          mode: document.querySelector('#color-mode').value,
+          coreLayers: Object.values(__testMap._layers).filter(l => l.feature && l.options.pane !== 'lozfsPane').map(l => L.stamp(l))
+        })"""
+        before = page.evaluate(snapshot)
+        self.assert_active_object(plan, page)
+        self.assert_active_note(plan, page)
+        for enabled in (False, True, False, True):
+            page.locator("#lozfs-visible").set_checked(enabled)
+            self.assertTrue(popup.evaluate("el => el.isConnected && el === document.querySelector('.leaflet-popup')"))
+            self.assertEqual(page.evaluate(snapshot), before)
+            self.assertEqual(self.saved(page), saved)
+            self.assert_boundary_visible(page)
+        page.locator("#objects-tab").click()
+        self.assert_objects([f for f in self.features["rozplan"]
+                             if f["properties"]["type"] == plan["properties"]["type"]], page)
+        page.locator("#list-tab").click()
+        expect(page.locator(".entry")).to_have_count(1)
+        expect(page.locator(".entry textarea")).to_have_value("LoZFS must preserve this note")
+        popup.dispose()
+
+    def test_lozfs_optional_pending_does_not_block_core_and_starts_disabled(self):
+        """LOZFS-01: hold both optional responses until core and saved list are usable."""
+        page = self.page
+        self.load_entries([self.plan], ["Saved before optional loading"], page)
+        pending = []
+        page.route("**/layers/lozfs-*.geojson", lambda route: pending.append(route))
+        page.reload(wait_until="domcontentloaded")
+        self.wait_ready(page)
+        page.wait_for_function("performance.getEntriesByType('resource').some(e => e.name.endsWith('bdl.geojson'))")
+        expect(page.locator("#lozfs-visible")).to_be_disabled()
+        expect(page.locator("#lozfs-visible")).not_to_be_checked()
+        expect(page.locator("#lozfs-legend")).to_be_hidden()
+        page.locator("#list-tab").click()
+        expect(page.locator(".entry textarea")).to_have_value("Saved before optional loading")
+        self.click_point(page=page)
+        self.choose(self.plan, page)
+        self.assertEqual(len(pending), 2)
+        for route in pending:
+            name = urlsplit(route.request.url).path.rsplit("/", 1)[1]
+            route.fulfill(status=200, content_type="application/geo+json",
+                          body=(ROOT / "web/layers" / name).read_bytes())
+        page.locator("#layers-tab").click()
+        expect(page.locator("#lozfs-visible")).to_be_enabled()
+        expect(page.locator("#lozfs-visible")).not_to_be_checked()
+        expect(page.locator(".leaflet-lozfs-pane path")).to_have_count(0)
+        page.locator("#lozfs-visible").check()
+        self.assert_lozfs_rendered(page)
+
+    def test_lozfs_optional_404_and_malformed_json_preserve_core_and_saved_list(self):
+        """LOZFS-01: failure of either optional source is isolated from core loading."""
+        for name in ("proposed", "established"):
+            for failure in ("404", "malformed", "invalid-shape"):
+                with self.subTest(source=name, failure=failure):
+                    page = self.open_page()
+                    self.load_entries([self.plan], ["Saved despite LoZFS failure"], page)
+                    saved = self.saved(page)
+                    page.route(f"**/layers/lozfs-{name}.geojson", lambda route, failure=failure:
+                               route.fulfill(status=404 if failure == "404" else 200,
+                                             content_type="application/json",
+                                             body='{"type":"FeatureCollection","features":null}'
+                                             if failure == "invalid-shape" else "not JSON"))
+                    page.reload()
+                    self.wait_ready(page)
+                    expect(page.locator("#warnings")).to_contain_text("LoZFS")
+                    expect(page.locator("#lozfs-visible")).to_be_disabled()
+                    expect(page.locator("#lozfs-visible")).not_to_be_checked()
+                    expect(page.locator("#lozfs-legend")).to_be_hidden()
+                    expect(page.locator(".leaflet-lozfs-pane path")).to_have_count(0)
+                    page.locator("#list-tab").click()
+                    expect(page.locator(".entry textarea")).to_have_value("Saved despite LoZFS failure")
+                    self.assertEqual(self.saved(page), saved)
+                    self.click_point(page=page)
+                    self.choose(self.plan, page)
+                    page.locator(".detail-view textarea").fill("Core still edits notes")
+                    self.wait_saved([{"note": "Core still edits notes"}], page)
+                    page.locator("#layers-tab").click()
+                    page.locator("#no-types").click()
+                    expect(page.locator("#visible-count")).to_have_text("0 / 826")
+                    self.assert_boundary_visible(page)
+                    page.context.close()
+                    self.contexts.remove(page.context)
 
     def wait_map_idle(self, page=None):
         (page or self.page).wait_for_function("""() =>

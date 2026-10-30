@@ -24,6 +24,11 @@
 @media(max-width:720px){.map-shell:has(.leaflet-popup) .leaflet-top.leaflet-right{top:auto;bottom:50px}}
 .object-saved[hidden]{display:none}
 .basemaps label{background:transparent;border:0;border-radius:0}
+.lozfs-legend{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:11px;color:var(--muted);padding:2px 0 8px}
+.lozfs-legend[hidden]{display:none}
+.lozfs-legend>span{display:flex;align-items:center;gap:6px}
+.lozfs-key{display:inline-block;width:24px;height:14px;border:1.6px solid #287a3c;background:repeating-linear-gradient(135deg,transparent 0 4px,#287a3ccc 4px 5.4px,transparent 5.4px 8px)}
+.lozfs-key.proposed{border-style:dashed}
 .color-label{display:block;font-size:12px;margin:14px 0 6px}
 #color-mode{width:100%;padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--paper);color:var(--ink);font-size:12px}
 .plan-legend{padding:10px 0;font-size:11px}
