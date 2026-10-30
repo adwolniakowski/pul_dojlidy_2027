@@ -1529,6 +1529,45 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(page.locator(".result-button").all_text_contents(), hits)
                 self.assertEqual(self.saved(), saved)
 
+    def test_plan_transparency_slider(self):
+        """PLAN-06: live fill transparency, both modes and filter rebuilds."""
+        page = self.page
+        slider = page.locator("#plan-transparency")
+        expect(slider).to_be_enabled()
+        expect(slider).to_have_value("30")
+        def opacity():
+            return page.evaluate("""() => {
+              let values = [];
+              __testMap.eachLayer(layer => {
+                if (layer instanceof L.GeoJSON && typeof layer.options.style === 'function')
+                  values = layer.getLayers().map(child => child.options.fillOpacity);
+              });
+              return [...new Set(values)];
+            }""")
+        self.assertEqual(opacity(), [0.7])
+        self.click_point()
+        self.choose(self.plan)
+        page.locator("#layers-tab").click()
+        page.evaluate("window.__sliderPopup = __testMap._popup")
+        for mode in ("percent", "type"):
+            page.locator("#color-mode").select_option(mode)
+            slider.focus()
+            slider.press("Home")
+            expect(page.locator("#plan-transparency-value")).to_have_text("0%")
+            self.assertEqual(opacity(), [1])
+            slider.press("End")
+            expect(page.locator("#plan-transparency-value")).to_have_text("100%")
+            self.assertEqual(opacity(), [0])
+            self.assertTrue(page.evaluate("__testMap._popup === window.__sliderPopup"))
+            expect(page.locator(".detail-view h3")).to_have_text(pretty(self.plan["properties"]["address"]))
+        page.locator("#no-types").click()
+        page.locator("#all-types").click()
+        self.assertEqual(opacity(), [0])
+        page.reload()
+        self.wait_ready(page)
+        expect(slider).to_have_value("30")
+        self.assertEqual(opacity(), [0.7])
+
     def plan_styles(self, page=None):
         """Inspect the thematic GeoJSON, not saved/focus copies of its features."""
         return (page or self.page).evaluate("""() => {

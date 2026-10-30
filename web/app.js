@@ -60,7 +60,8 @@
   const [manifest, bdl, rozplan, boundary] = data;
   const featureIndex = new Map([...bdl.features, ...rozplan.features].map(f => [`${f.properties.source}:${f.properties.id}`, f]));
   let colorMode = 'percent';
-  const planStyle = f => ({color: planColor(f.properties, colorMode), weight: 1.4, fillOpacity: .55});
+  let planTransparency = 30;
+  const planStyle = f => ({color: planColor(f.properties, colorMode), weight: 1.4, fillOpacity: 1 - planTransparency / 100});
   let enabledTypes = new Set(manifest.types);
   let activeObjectId = null;
   let activeAddressKey = null;
@@ -429,6 +430,12 @@
     colorMode = e.target.value; planLayer.setStyle(planStyle); renderLegend();
     selected.bringToFront(); focus.bringToFront();
   };
+  $('plan-transparency').oninput = e => {
+    planTransparency = Number(e.target.value);
+    $('plan-transparency-value').textContent = `${planTransparency}%`;
+    planLayer.setStyle(planStyle);
+  };
+  $('plan-transparency').disabled = false;
   for (const id of ['bdl-visible', 'plan-visible']) $(id).onchange = syncLayers;
   $('all-types').onclick = () => { enabledTypes = new Set(manifest.types); syncLayers(); };
   $('no-types').onclick = () => { enabledTypes.clear(); syncLayers(); };

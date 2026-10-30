@@ -31,6 +31,8 @@
 .lozfs-key.proposed{border-style:dashed}
 .color-label{display:block;font-size:12px;margin:14px 0 6px}
 #color-mode{width:100%;padding:8px;border:1px solid var(--line);border-radius:4px;background:var(--paper);color:var(--ink);font-size:12px}
+.transparency-label{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin:12px 0 5px}
+#plan-transparency{display:block;width:100%;margin:0;cursor:pointer}
 .plan-legend{padding:10px 0;font-size:11px}
 .legend-title{font-weight:650;margin-bottom:8px}
 .color-ramp{height:14px;border:1px solid #18392f33;border-radius:3px}

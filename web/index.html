@@ -34,6 +34,8 @@
             <option value="percent" selected>Procent pozyskania</option>
             <option value="type">Rodzaj rębni</option>
           </select>
+          <label class="transparency-label" for="plan-transparency">Przezroczystość BULIG <output id="plan-transparency-value" for="plan-transparency">30%</output></label>
+          <input id="plan-transparency" type="range" min="0" max="100" step="1" value="30" disabled>
           <div id="plan-legend" class="plan-legend" aria-live="polite"></div>
           <p class="filter-caption">Rodzaj rębni <span id="visible-count"></span></p>
           <div class="filter-actions"><button id="all-types" type="button">Wszystkie</button><button id="no-types" type="button">Żadne</button></div>
