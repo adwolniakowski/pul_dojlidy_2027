@@ -14,6 +14,13 @@
 .object-button.is-active strong{color:#102b9c}
 .entry.is-active{border-color:#102bff;box-shadow:inset 3px 0 #102bff}
 #export-markdown{width:100%;margin:12px 0 4px;font-size:12px}
+.inventory{border-top:1px solid var(--line);padding-top:12px}
+.inventory summary{font-size:12px}
+.inventory-layer h4{font-size:13px;margin:12px 0 6px;overflow-wrap:anywhere}
+.inventory-species{list-style:none;padding:0;margin:0}
+.inventory-species li{padding:8px 0;border-top:1px solid var(--line)}
+.inventory-species h5{font-size:12px;margin:0;overflow-wrap:anywhere}
+.popup .inventory dl{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px 10px}
 @media(max-width:720px){.map-shell:has(.leaflet-popup) .leaflet-top.leaflet-right{top:auto;bottom:50px}}
 .object-saved[hidden]{display:none}
 .basemaps label{background:transparent;border:0;border-radius:0}

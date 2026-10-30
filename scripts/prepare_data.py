@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prepare local Dojlidy layers. Run from any directory; sources are read-only.
 
-INFO-01, INFO-02, PLAN-01 to PLAN-03, SEL-03 to SEL-05: data, not UI acceptance.
-No spatial/address joins, simplification, coordinate rounding, or record merging.
+INFO-01 to INFO-03, PLAN-01 to PLAN-03, SEL-03 to SEL-05: data, not UI acceptance.
+Only exact BDL ID/year/storey joins; no spatial/address joins or record merging.
 """
 
 import csv
@@ -41,18 +41,34 @@ DETAILS = {
     "prot_categ": ("Kategoria ochronnosci", "f_prot_categ_dic.txt", "prot_category_cd", "prot_category_name"),
 }
 TO_WGS84 = Transformer.from_crs(2180, 4326, always_xy=True)
+INVENTORY_DICTIONARIES = {
+    "storey": ("f_storey_dic.txt", "storey_cd", "storey_name"),
+    "species": ("f_tree_species_dic.txt", "species_cd", "species_name"),
+    "part": ("f_part_dic.txt", "part_cd", "part_name"),
+    "density": ("f_density_dic.txt", "density_cd", "density_name"),
+    "mixture": ("f_mixture_dic.txt", "mixture_cd", "mixture_name"),
+}
+INVENTORY_TABLES = ("f_subarea.txt", "f_arod_storey.txt", "f_storey_species.txt")
 
 
 def source_files():
+    # Keep the shipped selection-identity inputs separate from inventory provenance.
     return sorted({p.with_suffix(ext) for p in SOURCES.values()
                    for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg")} |
                   {BDL / spec[1] for spec in DETAILS.values()})
 
 
-def fingerprint():
+def inventory_source_files():
+    return sorted({BDL / name for name in INVENTORY_TABLES} |
+                  {BDL / spec[0] for spec in INVENTORY_DICTIONARIES.values()} |
+                  {SOURCES["bdl"].with_suffix(ext)
+                   for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg")})
+
+
+def fingerprint(paths=None):
     """Hash consumed source bytes and relative names, never mtimes or absolute paths."""
     digest = hashlib.sha256()
-    for path in source_files():
+    for path in source_files() if paths is None else paths:
         name = path.relative_to(ROOT).as_posix().encode("utf-8")
         digest.update(len(name).to_bytes(8, "big"))
         digest.update(name)
@@ -128,8 +144,109 @@ def text(value):
     return "" if value is None else str(value)
 
 
+def table_rows(filename):
+    with (BDL / filename).open(encoding="utf-8-sig", newline="") as handle:
+        yield from csv.DictReader(handle, delimiter="\t")
+
+
+def inventory_number(value):
+    if not value.strip():
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"Nonfinite inventory number: {value!r}")
+    return number
+
+
+def build_inventory():
+    lookup = {}
+    for kind, (filename, code, name) in INVENTORY_DICTIONARIES.items():
+        values = {}
+        for row in table_rows(filename):
+            key, value = row[code].strip(), row[name].strip()
+            if not key or not value or (key in values and values[key] != value):
+                raise ValueError(f"Ambiguous/empty inventory dictionary {filename}: {key}")
+            values[key] = value
+        lookup[kind] = values
+
+    def decode(kind, code, required=False):
+        code = code.strip()
+        if not code and not required:
+            return None
+        if code not in lookup[kind]:
+            raise ValueError(f"Unknown inventory {kind} code: {code!r}")
+        return lookup[kind][code]
+
+    inventories, storeys, species = {}, {}, {}
+    counts = {}
+    for filename in INVENTORY_TABLES:
+        count = 0
+        for row in table_rows(filename):
+            count += 1
+            identifier, year = row["arodes_int_num"].strip(), row["a_year"].strip()
+            if not identifier or year != "2026":
+                raise ValueError(f"{filename}: missing ID or unexpected year: {identifier}/{year}")
+            if filename == "f_subarea.txt":
+                if identifier in inventories:
+                    raise ValueError(f"Ambiguous inventory subarea: {identifier}/{year}")
+                inventories[identifier] = {
+                    "structure": row["stand_struct_cd"].strip() or None,
+                    "rotationAge": inventory_number(row["rotation_age"]), "layers": []}
+                continue
+            if identifier not in inventories:
+                raise ValueError(f"{filename}: no subarea for {identifier}/{year}")
+            code = row["storey_cd"].strip()
+            decode("storey", code, required=True)
+            key = (identifier, code)
+            if filename == "f_arod_storey.txt":
+                if key in storeys:
+                    raise ValueError(f"Ambiguous inventory storey: {key}/{year}")
+                rank = inventory_number(row["st_rank_order_act"])
+                if rank is None:
+                    raise ValueError(f"Missing inventory storey rank: {key}")
+                storeys[key] = (rank, {
+                    "code": code, "name": decode("storey", code, required=True),
+                    "density": decode("density", row["density_cd"]),
+                    "mixture": decode("mixture", row["mixture_cd"]),
+                    "stocking": inventory_number(row["standdensity_index"]), "species": []})
+            else:
+                rank = inventory_number(row["sp_rank_order_act"])
+                if rank is None:
+                    raise ValueError(f"Missing inventory species rank: {key}")
+                species.setdefault(key, []).append((rank, {
+                    "code": row["species_cd"].strip(),
+                    "name": decode("species", row["species_cd"], required=True),
+                    "age": inventory_number(row["species_age"]),
+                    "share": decode("part", row["part_cd_act"]),
+                    "siteClass": row["site_class_cd"].strip() or None,
+                    "height": inventory_number(row["height"]),
+                    "diameter": inventory_number(row["bhd"])}))
+        counts[filename] = count
+    missing = sorted(set(species) - set(storeys))
+    for key in missing:
+        # No rank/metadata may be inferred from species. Append these layers by code.
+        storeys[key] = (math.inf, {
+            "code": key[1], "name": decode("storey", key[1], required=True),
+            "density": None, "mixture": None, "stocking": None, "species": []})
+    ties = 0
+    for key, rows in species.items():
+        ties += len(rows) - len({rank for rank, _ in rows})
+        # Python's stable sort preserves source order for tied ranks (different ages).
+        storeys[key][1]["species"] = [item for _, item in sorted(rows, key=lambda r: r[0])]
+    for (identifier, code), (_, layer) in sorted(storeys.items(), key=lambda r: (r[1][0], r[0])):
+        inventories[identifier]["layers"].append(layer)
+    return inventories, {
+        "sourceRecords": counts, "unknownDictionaryCodes": {},
+        "duplicateSubareaKeys": 0, "duplicateStoreyKeys": 0,
+        "speciesRankTies": ties,
+        "layersWithoutMetadata": [{"id": i, "code": c} for i, c in missing],
+        "ordering": "Layer rank then code; missing metadata last by code. Species rank, ties in source order.",
+    }
+
+
 def build_layers():
     lookup = dictionaries()
+    inventories, inventory_validation = build_inventory()
     layers, validation = {}, {}
     for layer, path in SOURCES.items():
         # Legacy ESRI WKT lacks EPSG authority/axis metadata (PROJ confidence 60).
@@ -162,6 +279,9 @@ def build_layers():
                     properties["year"] = 2026
                     properties["details"] = {}
                     if layer == "bdl":
+                        if identifier not in inventories:
+                            raise ValueError(f"No inventory subarea for G_SUBAREA {identifier}/2026")
+                        properties["inventory"] = inventories[identifier]
                         for field, (label, *_) in DETAILS.items():
                             code = text(row[field]).strip()
                             value = "Brak danych"
@@ -185,12 +305,22 @@ def build_layers():
     types = sorted({f["properties"]["type"] for f in layers["rozplan"]["features"]})
     if types != TYPES:
         raise ValueError(f"Unexpected cutting symbols: {types}")
-    manifest = {"version": fingerprint(), "counts": COUNTS, "types": types,
+    published = [f["properties"]["inventory"] for f in layers["bdl"]["features"]]
+    inventory_validation.update(
+        publishedSubareas=len(published),
+        publishedLayers=sum(len(i["layers"]) for i in published),
+        publishedSpecies=sum(len(l["species"]) for i in published for l in i["layers"]))
+    manifest = {"version": fingerprint(),
+                "inventoryVersion": fingerprint(inventory_source_files()),
+                "inventorySources": [p.relative_to(ROOT).as_posix() for p in inventory_source_files()],
+                "counts": COUNTS, "types": types,
                 "validation": {"sourceCRS": "EPSG:2180", "outputCRS": "EPSG:4326",
                                "axisOrder": "longitude,latitude", "layers": validation,
+                               "inventory": inventory_validation,
                                "dependencies": {"pyproj": pyproj.__version__, "shapely": shapely.__version__,
                                                 "pyshp": shapefile.__version__, "PROJ": pyproj.proj_version_str},
-                               "notes": ["No joins, simplification, rounding, or record merging.",
+                               "notes": ["Only exact BDL ID/year/storey joins; no address/spatial joins, simplification, rounding, or record merging.",
+                                         "Inventory structure is a raw BDL code, not a decoded label. Volume is excluded; units/meaning unconfirmed.",
                                          "planYear is raw ROK; interpretation unconfirmed, not a calendar year.",
                                          "BDL 2026 is not confirmed equivalent to PUL 2027-2037."]}}
     return layers, manifest

@@ -116,7 +116,7 @@
       const f = featureIndex.get(`${entry.source}:${entry.id}`);
       if (f && (f.properties.source === 'bdl' ? $('bdl-visible').checked : $('plan-visible').checked && enabledTypes.has(f.properties.type))) selected.addData(f);
     }
-    selected.bringToFront(); focus.bringToFront();
+    boundaryLayer.bringToFront(); selected.bringToFront(); focus.bringToFront();
   }
   function scrollActiveEntry() {
     const sidebar = $('sidebar');
@@ -178,6 +178,20 @@
     for (const entry of entries) {
       const card = node('article', undefined, 'entry');
       card.dataset.addressKey = entry.key;
+      card.tabIndex = 0;
+      card.setAttribute('aria-label', `Uwaga do ${prettyAddress(entry.address)}`);
+      const activate = event => {
+        if (event.target.closest('button') || activeAddressKey === entry.key) return;
+        const feature = featureIndex.get(`${entry.source}:${entry.id}`);
+        $(entry.source === 'bdl' ? 'bdl-visible' : 'plan-visible').checked = true;
+        if (entry.source === 'rozplan') enabledTypes.add(feature.properties.type);
+        syncLayers();
+        const bounds = L.geoJSON(feature).getBounds();
+        map.fitBounds(bounds, {padding: [35, 35], maxZoom: 17});
+        showResults([feature], bounds.getCenter());
+      };
+      card.onclick = activate;
+      card.addEventListener('focusin', activate);
       card.append(node('h3', prettyAddress(entry.address)), node('small', entry.source === 'bdl' ? 'Źródło adresu: BDL 2026' : 'Źródło adresu: BULIG'));
       const label = node('label', 'Twoja notatka');
       const text = node('textarea'); text.value = entry.note; text.disabled = blocked; text.setAttribute('aria-label', `Notatka: ${prettyAddress(entry.address)}`);
@@ -185,14 +199,7 @@
       text.oninput = () => updateNote(entry.key, text.value, text);
       label.append(text); card.append(label);
       const actions = node('div', undefined, 'entry-actions');
-      actions.append(button('Pokaż na mapie', () => {
-        const f = featureIndex.get(`${entry.source}:${entry.id}`);
-        const layerInput = $(entry.source === 'bdl' ? 'bdl-visible' : 'plan-visible'); layerInput.checked = true;
-        if (entry.source === 'rozplan') enabledTypes.add(f.properties.type);
-        syncLayers();
-        map.fitBounds(L.geoJSON(f).getBounds(), {padding: [35, 35], maxZoom: 17});
-        showResults([f], L.geoJSON(f).getBounds().getCenter());
-      }), button('Usuń', () => { if (blocked) return; entries = entries.filter(e => e !== entry); map.closePopup(); persist(); renderList(); }));
+      actions.append(button('Usuń', () => { if (blocked) return; entries = entries.filter(e => e !== entry); map.closePopup(); persist(); renderList(); }));
       card.append(actions); container.append(card);
     }
     drawSelection();
@@ -249,6 +256,42 @@
         textarea.oninput = () => updateNote(existing.key, textarea.value, textarea);
         label.append(textarea); detail.append(label);
       }
+      if (p.source === 'bdl') {
+        const inventory = node('details', undefined, 'inventory');
+        inventory.append(node('summary', 'Opis taksacyjny · BDL 2026'));
+        inventory.ontoggle = () => {
+          if (inventory.open && !inventory.querySelector('.inventory-content')) {
+            const content = node('div', undefined, 'inventory-content');
+            const number = new Intl.NumberFormat('pl-PL', {maximumFractionDigits: 2});
+            function fields(parent, rows) {
+              const list = node('dl');
+              for (const [label, value] of rows) {
+                const text = value == null || value === '' ? 'Brak danych' : typeof value === 'number' ? number.format(value) : value;
+                list.append(node('dt', label), node('dd', text));
+              }
+              parent.append(list);
+            }
+            fields(content, [['Struktura drzewostanu (kod BDL)', p.inventory?.structure], ['Wiek rębności [lata]', p.inventory?.rotationAge]]);
+            if (!p.inventory?.layers?.length) content.append(node('p', 'Brak danych o warstwach drzewostanu.', 'notice'));
+            for (const layer of p.inventory?.layers || []) {
+              const section = node('section', undefined, 'inventory-layer');
+              section.append(node('h4', layer.name));
+              fields(section, [['Zwarcie', layer.density], ['Zmieszanie', layer.mixture], ['Wskaźnik zadrzewienia', layer.stocking]]);
+              const species = node('ul', undefined, 'inventory-species');
+              if (!layer.species.length) section.append(node('p', 'Brak danych o gatunkach.', 'notice'));
+              for (const item of layer.species) {
+                const row = node('li'); row.append(node('h5', item.name));
+                fields(row, [['Udział', item.share], ['Wiek [lata]', item.age], ['Bonitacja', item.siteClass], ['Wysokość [m]', item.height], ['Pierśnica [cm]', item.diameter]]);
+                species.append(row);
+              }
+              section.append(species); content.append(section);
+            }
+            inventory.append(content);
+          }
+          popup.update();
+        };
+        detail.append(inventory);
+      }
       popup.update();
     }
     for (const source of ['bdl', 'rozplan']) {
@@ -279,7 +322,7 @@
   });
   function syncLayers() {
     map.closePopup(); focus.clearLayers();
-    for (const [input, layer] of [['bdl-visible', bdlLayer], ['plan-visible', planLayer], ['boundary-visible', boundaryLayer]]) {
+    for (const [input, layer] of [['bdl-visible', bdlLayer], ['plan-visible', planLayer]]) {
       if ($(input).checked) layer.addTo(map); else map.removeLayer(layer);
     }
     planLayer.clearLayers();
@@ -349,7 +392,7 @@
     colorMode = e.target.value; planLayer.setStyle(planStyle); renderLegend();
     selected.bringToFront(); focus.bringToFront();
   };
-  for (const id of ['bdl-visible', 'plan-visible', 'boundary-visible']) $(id).onchange = syncLayers;
+  for (const id of ['bdl-visible', 'plan-visible']) $(id).onchange = syncLayers;
   $('all-types').onclick = () => { enabledTypes = new Set(manifest.types); syncLayers(); };
   $('no-types').onclick = () => { enabledTypes.clear(); syncLayers(); };
   window.addEventListener('storage', e => {

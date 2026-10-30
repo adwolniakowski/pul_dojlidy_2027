@@ -5,6 +5,7 @@ No availability, imagery, licensing, or accuracy claim about external services i
 """
 
 from collections import defaultdict
+import csv
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -100,6 +101,70 @@ class BrowserTests(unittest.TestCase):
         for feature in cls.features["rozplan"]:
             grouped[address_key(feature["properties"]["address"])].append(feature)
         cls.repeated_plan = next(group for group in grouped.values() if len(group) > 1)
+        # Build the rich fixture independently from the source tables, not the
+        # published inventory (which could itself have lost secondary records).
+        bdl_source = ROOT / "data/BDL_01_08_DOJLIDY_2026"
+
+        def table(filename):
+            with (bdl_source / filename).open(encoding="utf-8-sig", newline="") as handle:
+                return list(csv.DictReader(handle, delimiter="\t"))
+
+        dictionaries = {
+            kind: {r[code].strip(): r[name].strip() for r in table(filename)}
+            for kind, filename, code, name in (
+                ("layer", "f_storey_dic.txt", "storey_cd", "storey_name"),
+                ("species", "f_tree_species_dic.txt", "species_cd", "species_name"),
+                ("share", "f_part_dic.txt", "part_cd", "part_name"),
+                ("density", "f_density_dic.txt", "density_cd", "density_name"),
+                ("mixture", "f_mixture_dic.txt", "mixture_cd", "mixture_name"),
+            )
+        }
+        metadata, species = {}, defaultdict(list)
+        for row in table("f_arod_storey.txt"):
+            if row["a_year"] == "2026":
+                metadata[row["arodes_int_num"], row["storey_cd"].strip()] = row
+        for row in table("f_storey_species.txt"):
+            if row["a_year"] == "2026":
+                species[row["arodes_int_num"], row["storey_cd"].strip()].append(row)
+        published_ids = {f["properties"]["id"] for f in cls.features["bdl"]}
+        candidates = defaultdict(list)
+        for (identifier, code), rows in species.items():
+            if identifier in published_ids:
+                candidates[identifier].extend(rows)
+        rich_ids = [identifier for identifier, rows in candidates.items()
+                    if {"MJS", "PJD"} <= {r["part_cd_act"].strip() for r in rows}
+                    and len({r["storey_cd"] for r in rows}) > 1
+                    and len({r["species_age"] for r in rows}) > 1]
+        if not rich_ids:
+            raise AssertionError("No multi-layer, multi-age source fixture with both minor shares")
+        identifier = max(rich_ids, key=lambda key: len(candidates[key]))
+        cls.inventory_bdl = next(f for f in cls.features["bdl"] if f["properties"]["id"] == identifier)
+        subarea = next(r for r in table("f_subarea.txt")
+                       if r["arodes_int_num"] == identifier and r["a_year"] == "2026")
+
+        def number(raw):
+            return float(raw) if raw.strip() else None
+
+        cls.source_inventory = {"structure": subarea["stand_struct_cd"].strip() or None,
+                                "rotationAge": number(subarea["rotation_age"]), "layers": []}
+        keys = sorted((k for k in metadata.keys() | species.keys() if k[0] == identifier),
+                      key=lambda k: (float(metadata[k]["st_rank_order_act"]) if k in metadata else float("inf"), k[1]))
+        for key in keys:
+            meta = metadata.get(key, {})
+            layer = {"code": key[1], "name": dictionaries["layer"][key[1]],
+                     "density": dictionaries["density"].get(meta.get("density_cd", "").strip()),
+                     "mixture": dictionaries["mixture"].get(meta.get("mixture_cd", "").strip()),
+                     "stocking": number(meta.get("standdensity_index", "")), "species": []}
+            for row in sorted(species[key], key=lambda r: int(r["sp_rank_order_act"])):
+                code = row["species_cd"].strip()
+                layer["species"].append({
+                    "code": code, "name": dictionaries["species"][code],
+                    "share": dictionaries["share"].get(row["part_cd_act"].strip()),
+                    "siteClass": row["site_class_cd"].strip() or None,
+                    "age": number(row["species_age"]), "height": number(row["height"]),
+                    "diameter": number(row["bhd"]),
+                })
+            cls.source_inventory["layers"].append(layer)
         cls.server = ThreadingHTTPServer(
             ("127.0.0.1", 0), partial(QuietHandler, directory=str(ROOT / "web"))
         )
@@ -169,7 +234,8 @@ class BrowserTests(unittest.TestCase):
             expect(label).to_have_css("border-top-width", "0px")
         expect(self.page.locator("#layers-panel legend")).to_have_text(["01 / Podkład mapy", "02 / Dane leśne"])
         forest = self.page.locator("#layers-panel fieldset").nth(1)
-        expect(forest.locator("#bdl-visible, #boundary-visible, #mbdl-visible, #plan-visible")).to_have_count(4)
+        expect(forest.locator("#bdl-visible, #mbdl-visible, #plan-visible")).to_have_count(3)
+        self.assert_boundary_visible(self.page)
         expect(forest.locator("small")).to_have_text(["Stan na 2026 rok", "Oddziały i wydzielenia; widoczne po przybliżeniu", "Plan rębni"])
         expect(forest.locator("label:has(#plan-visible) small")).to_have_text("Plan rębni")
         expect(forest).to_contain_text("BULIG")
@@ -190,6 +256,57 @@ class BrowserTests(unittest.TestCase):
           [...document.querySelectorAll('.leaflet-popup')].every(
             el => getComputedStyle(el).opacity === '1')
         """)
+
+    def assert_boundary_visible(self, page):
+        """MAP-06: identify the boundary itself, never the similarly colored BDL."""
+        expect(page.locator("#boundary-visible")).to_have_count(0)
+        self.assertTrue(page.evaluate("""() => {
+          const boundaries = Object.values(__testMap._layers).filter(layer =>
+            layer instanceof L.GeoJSON && layer.options.style?.dashArray === '8 6');
+          return boundaries.length === 1 && boundaries[0].getLayers().length === 1 &&
+            boundaries[0].getLayers().every(child => __testMap.hasLayer(child) &&
+              child._renderer?._container?.isConnected &&
+              child._renderer._layers[L.stamp(child)] === child && child.options.fill === false &&
+              child.options.dashArray === '8 6' && child.options.weight > 0 &&
+              getComputedStyle(child._renderer._container).display !== 'none');
+        }"""), "Inspectorate boundary must remain rendered on the map")
+
+    def track_note_navigation(self, page):
+        page.evaluate("""() => {
+          window.__testNoteFits = [];
+          window.__testNotePopups = [];
+          const fit = __testMap.fitBounds, popup = L.popup;
+          __testMap.fitBounds = function(bounds, ...args) {
+            __testNoteFits.push(bounds.toBBoxString());
+            return fit.call(this, bounds, ...args);
+          };
+          L.popup = function(...args) {
+            const result = popup.apply(this, args);
+            __testNotePopups.push(result);
+            return result;
+          };
+        }""")
+
+    def assert_note_navigation(self, feature, count, page):
+        self.wait_map_idle(page)
+        expect(page.locator(".leaflet-popup")).to_have_count(1)
+        expect(page.locator(".result-button")).to_have_count(1)
+        expect(page.locator('.result-button[aria-pressed="true"]')).to_have_count(1)
+        self.assert_active_note(feature, page)
+        self.assert_active_object(feature if feature["properties"]["source"] == "rozplan" else None, page)
+        self.assertEqual(page.evaluate("[__testNoteFits.length, __testNotePopups.length]"), [count, count])
+        self.assertTrue(page.evaluate("""feature => {
+          const bounds = L.geoJSON(feature).getBounds();
+          const focus = Object.values(__testMap._layers).find(layer =>
+            layer instanceof L.GeoJSON && layer.options.style?.color === '#102bff');
+          return __testNoteFits.at(-1) === bounds.toBBoxString() &&
+            __testMap.getBounds().intersects(bounds) &&
+            __testMap._popup === __testNotePopups.at(-1) &&
+            focus.getLayers().length === 1 &&
+            JSON.stringify(focus.getLayers()[0].feature) === JSON.stringify(feature);
+        }""", feature))
+        expect(page.locator("#list-tab")).to_have_attribute("aria-pressed", "true")
+        self.assert_boundary_visible(page)
 
     def hits(self, point, source):
         return [
@@ -611,6 +728,169 @@ class BrowserTests(unittest.TestCase):
             expect(active).to_have_attribute("data-address-key", address_key(feature["properties"]["address"]))
             expect(active).to_have_attribute("aria-current", "true")
 
+    def test_note_card_activation_click_keyboard_edit_and_delete_desktop_mobile(self):
+        """LIST-05: navigation happens once on activation, never during editing/deletion."""
+        features = [self.repeated_plan[1], self.matched_bdl]
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                entries = self.load_entries(features, ["Original note"] * 2, page)
+                before = self.saved(page)
+                self.track_note_navigation(page)
+                for count, method in enumerate(("click", "textarea-click"), 1):
+                    feature = features[(count - 1) % 2]
+                    p = feature["properties"]
+                    page.locator("#layers-tab").click()
+                    for source in ("bdl", "plan", "mbdl"):
+                        page.locator(f"#{source}-visible").uncheck()
+                    page.locator("#no-types").click()
+                    page.evaluate("__testMap.setView([0, 0], 4, {animate: false})")
+                    self.assert_boundary_visible(page)
+                    page.locator("#list-tab").click()
+                    card = page.locator(f'.entry[data-address-key="{address_key(p["address"])}"]')
+                    editor = card.locator("textarea")
+                    expect(card).to_have_attribute("tabindex", "0")
+                    expect(card).to_have_attribute("aria-label", f'Uwaga do {pretty(p["address"])}')
+                    expect(card.get_by_role("button", name="Poka\u017c na mapie")).to_have_count(0)
+                    if method == "click":
+                        card.locator("h3").click()
+                    else:
+                        editor.click()
+                    expected_count = page.evaluate("__testNoteFits.length")
+                    self.assertEqual(expected_count, count)
+                    self.assert_note_navigation(feature, expected_count, page)
+                    source = "bdl" if p["source"] == "bdl" else "plan"
+                    self.assertTrue(page.locator(f"#{source}-visible").is_checked())
+                    if p["source"] == "rozplan":
+                        self.assertTrue(page.locator(f'[data-type="{p["type"]}"]').is_checked())
+                    editor.fill("Cursor retained")
+                    editor.press("Home")
+                    editor.press("ArrowRight")
+                    node = editor.element_handle()
+                    popup = page.evaluate_handle("__testMap._popup")
+                    editor.press("X")
+                    expect(editor).to_have_value("CXursor retained")
+                    self.assertTrue(node.evaluate("""el => el === document.activeElement &&
+                      el.isConnected && el.selectionStart === 2 && el.selectionEnd === 2"""))
+                    editor.click()
+                    card.locator("h3").click()
+                    editor.focus()
+                    editor.press("End")
+                    editor.press("!")
+                    expect(editor).to_be_focused()
+                    self.assertTrue(popup.evaluate("value => value === __testMap._popup"))
+                    self.assert_note_navigation(feature, expected_count, page)
+                    self.wait_saved([{"id": p["id"], "source": p["source"], "note": "CXursor retained!"}], page, exact_count=False)
+                    expect(page.locator(".detail-view textarea")).to_have_value("CXursor retained!")
+                    node.dispose()
+                    popup.dispose()
+                stored = json.loads(self.saved(page))
+                self.assertEqual(stored["version"], json.loads(before)["version"])
+                self.assertEqual([{k: e[k] for k in ("source", "id", "key", "address")} for e in stored["entries"]],
+                                 [{k: e[k] for k in ("source", "id", "key", "address")} for e in entries])
+                page.screenshot(path=str(SCREENSHOTS / f"pul-{'mobile' if mobile else 'desktop'}-note-card.png"), full_page=True)
+                # Delete an inactive card, then delete the remaining inactive card
+                # with the keyboard. Neither focus nor button bubbling navigates.
+                fits = page.evaluate("__testNoteFits.length")
+                first = page.locator(f'.entry[data-address-key="{entries[0]["key"]}"]')
+                first.get_by_role("button", name="Usu\u0144", exact=True).click()
+                self.wait_saved([{"id": entries[1]["id"]}], page, exact_count=True)
+                page.locator(".entry button").focus()
+                page.keyboard.press("Enter")
+                self.wait_saved([], page, exact_count=True)
+                self.assertEqual(page.evaluate("[__testNoteFits.length, __testNotePopups.length]"), [fits, fits])
+                expect(page.locator(".leaflet-popup")).to_have_count(0)
+                self.assert_boundary_visible(page)
+
+    def test_note_keyboard_focus_activates_inactive_card_and_textarea(self):
+        """LIST-05: actual Tab/Shift+Tab focus restores the exact stored feature."""
+        for mobile in (False, True):
+            for target in ("card", "textarea"):
+                with self.subTest(mobile=mobile, target=target):
+                    page = self.open_page(mobile=mobile)
+                    self.load_entries([self.repeated_plan[1], self.matched_bdl], ["First", "Second"], page)
+                    page.locator("#bdl-visible").uncheck()
+                    page.locator("#plan-visible").uncheck()
+                    page.locator("#no-types").click()
+                    page.locator("#list-tab").click()
+                    self.track_note_navigation(page)
+                    feature = self.matched_bdl if target == "card" else self.repeated_plan[1]
+                    card = page.locator(f'.entry[data-address-key="{address_key(feature["properties"]["address"])}"]')
+                    button = page.locator(".entry").first.get_by_role("button", name="Usu\u0144", exact=True)
+                    button.focus()
+                    self.assertEqual(page.evaluate("[__testNoteFits.length, __testNotePopups.length]"), [0, 0])
+                    page.keyboard.press("Tab" if target == "card" else "Shift+Tab")
+                    expect(card if target == "card" else card.locator("textarea")).to_be_focused()
+                    self.assert_note_navigation(feature, 1, page)
+                    card.locator("textarea").press("End")
+                    card.locator("textarea").press("!")
+                    self.assert_note_navigation(feature, 1, page)
+
+    def test_note_map_activation_preserves_bdl_provenance_while_editing_bulig(self):
+        """LIST-05/SEL-06: address activation never navigates back to the saved source."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                entries = self.load_entries([self.matched_bdl], ["Stored BDL"], page)
+                before = self.saved(page)
+                page.locator("#list-tab").click()
+                page.locator("#list-tab").focus()
+                self.track_note_navigation(page)
+                self.click_point(shape(self.matched_plan["geometry"]).representative_point(), page)
+                self.choose(self.matched_plan, page)
+                self.assertEqual(page.evaluate("__testNoteFits.length"), 0)
+                self.assertEqual(page.evaluate("__testNotePopups.length"), 1)
+                self.assertFalse(page.locator(".entry").evaluate("el => el.contains(document.activeElement)"))
+                self.assert_active_note(self.matched_bdl, page)
+                self.assertEqual(self.saved(page), before)
+                popup = page.evaluate_handle("__testMap._popup")
+                card = page.locator(".entry")
+                card.locator("h3").click()
+                card.focus()
+                card.locator("textarea").fill("Edit while viewing BULIG")
+                self.wait_saved([dict(entries[0], note="Edit while viewing BULIG")], page, exact_count=True)
+                self.assertEqual(page.evaluate("[__testNoteFits.length, __testNotePopups.length]"), [0, 1])
+                self.assertTrue(popup.evaluate("value => value === __testMap._popup"))
+                self.assert_active_object(self.matched_plan, page)
+                expect(page.locator(".detail-view .source-label")).to_have_text("BULIG \u00b7 plan r\u0119bni")
+                expect(page.locator(".detail-view textarea")).to_have_value("Edit while viewing BULIG")
+                expect(page.locator("#list-tab")).to_have_attribute("aria-pressed", "true")
+                self.assert_boundary_visible(page)
+                popup.dispose()
+
+    def test_boundary_persists_with_all_overlays_off_filters_reset_and_reload(self):
+        """MAP-06: the permanent boundary is independent of every user layer control."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                self.load_entries([self.repeated_plan[1]], ["Boundary regression"], page)
+                self.assert_boundary_visible(page)
+                for source in ("bdl", "plan", "mbdl"):
+                    page.locator(f"#{source}-visible").uncheck()
+                    self.assert_boundary_visible(page)
+                for action in ("no-types", "all-types", "no-types"):
+                    page.locator(f"#{action}").click()
+                    self.assert_boundary_visible(page)
+                for base in ("ortho", "osm"):
+                    page.locator(f'input[name="base"][value="{base}"]').check()
+                    for mode in ("type", "percent"):
+                        page.locator("#color-mode").select_option(mode)
+                        self.assert_boundary_visible(page)
+                page.locator("#home").click()
+                self.wait_map_idle(page)
+                self.assert_boundary_visible(page)
+                page.locator("#list-tab").click()
+                page.locator(".entry h3").click()
+                self.wait_map_idle(page)
+                self.assert_boundary_visible(page)
+                self.confirm_clear(False, page)
+                self.assert_boundary_visible(page)
+                self.confirm_clear(True, page)
+                self.assert_boundary_visible(page)
+                page.reload()
+                self.wait_ready(page)
+                self.assert_boundary_visible(page)
+
     def viewport_state(self, page):
         return page.evaluate("""() => {
           const r = document.querySelector('#map').getBoundingClientRect();
@@ -901,13 +1181,13 @@ class BrowserTests(unittest.TestCase):
         self.page.locator(".entry textarea").fill("Do not lose on base change")
         before = self.wait_saved([{"note": "Do not lose on base change"}])
         self.page.locator("#layers-tab").click()
-        self.page.locator("#boundary-visible").uncheck()
+        self.assert_boundary_visible(self.page)
         self.page.locator("#bdl-visible").uncheck()
         self.page.locator("#mbdl-visible").check()
         for base in ("ortho", "osm"):
             self.page.locator(f'input[name="base"][value="{base}"]').check()
             expect(self.page.locator("#bdl-visible")).not_to_be_checked()
-            expect(self.page.locator("#boundary-visible")).not_to_be_checked()
+            self.assert_boundary_visible(self.page)
             expect(self.page.locator("#plan-visible")).to_be_checked()
             expect(self.page.locator("#mbdl-visible")).to_be_checked()
             self.assertEqual(self.saved(), before)
@@ -1099,7 +1379,7 @@ class BrowserTests(unittest.TestCase):
                 page.locator("#no-types").click()
                 page.locator(f'[data-type="{self.plan["properties"]["type"]}"]').check()
                 page.locator("#bdl-visible").uncheck()
-                page.locator("#boundary-visible").uncheck()
+                self.assert_boundary_visible(page)
                 page.locator("#mbdl-visible").check()
                 self.add(page=page)
                 page.locator(".entry textarea").fill("Keep note through color changes")
@@ -1142,7 +1422,8 @@ class BrowserTests(unittest.TestCase):
                     expect(page.locator("#visible-count")).to_have_text(visible)
                     self.assertEqual(page.locator("[data-type]:checked").evaluate_all(
                         "els => els.map(el => el.dataset.type)"), [self.plan["properties"]["type"]])
-                    for selector, checked in (("bdl", False), ("boundary", False), ("mbdl", True), ("plan", True)):
+                    self.assert_boundary_visible(page)
+                    for selector, checked in (("bdl", False), ("mbdl", True), ("plan", True)):
                         self.assertEqual(page.locator(f"#{selector}-visible").is_checked(), checked)
                     self.assertEqual(self.saved(page), saved)
                     self.assert_no_overflow(page)
@@ -1163,6 +1444,216 @@ class BrowserTests(unittest.TestCase):
                 for style in self.plan_styles(page):
                     self.assertEqual(style["color"], page.evaluate(
                         "p => PulCore.planColor(p, 'type')", {"type": style["type"]}))
+
+    def assert_inventory(self, inventory, page):
+        """Compare every displayed source row, including repeated species/ages."""
+        def text(value):
+            if value is None or value == "":
+                return "Brak danych"
+            if isinstance(value, (int, float)):
+                return f"{value:,.2f}".rstrip("0").rstrip(".").replace(",", "\u00a0").replace(".", ",")
+            return value
+
+        def fields(locator, pairs):
+            expect(locator.locator(":scope > dt")).to_have_text([label for label, _ in pairs])
+            expect(locator.locator(":scope > dd")).to_have_text([text(value) for _, value in pairs])
+
+        content = page.locator(".inventory-content")
+        expect(content).to_have_count(1)
+        fields(content.locator(":scope > dl"), [
+            ("Struktura drzewostanu (kod BDL)", inventory["structure"]),
+            ("Wiek r\u0119bno\u015bci [lata]", inventory["rotationAge"]),
+        ])
+        layers = content.locator(".inventory-layer")
+        expect(layers).to_have_count(len(inventory["layers"]))
+        expect(content.locator(".inventory-species li")).to_have_count(
+            sum(len(layer["species"]) for layer in inventory["layers"]))
+        for index, layer in enumerate(inventory["layers"]):
+            section = layers.nth(index)
+            expect(section.locator("h4")).to_have_text(layer["name"])
+            fields(section.locator(":scope > dl"), [
+                ("Zwarcie", layer["density"]), ("Zmieszanie", layer["mixture"]),
+                ("Wska\u017anik zadrzewienia", layer["stocking"]),
+            ])
+            rows = section.locator(".inventory-species li")
+            expect(rows).to_have_count(len(layer["species"]))
+            for i, item in enumerate(layer["species"]):
+                expect(rows.nth(i).locator("h5")).to_have_text(item["name"])
+                fields(rows.nth(i).locator("dl"), [
+                    ("Udzia\u0142", item["share"]), ("Wiek [lata]", item["age"]),
+                    ("Bonitacja", item["siteClass"]), ("Wysoko\u015b\u0107 [m]", item["height"]),
+                    ("Pier\u015bnica [cm]", item["diameter"]),
+                ])
+        expect(content).not_to_contain_text(re.compile(r"XLSX|m[\u00b33]|mi\u0105\u017cszo\u015b\u0107|pozyskanie", re.I))
+
+    def assert_inventory_bounds(self, page):
+        self.wait_map_idle(page)
+        self.assert_no_overflow(page)
+        bounds = page.evaluate("""() => {
+          const rect = selector => {
+            const r = document.querySelector(selector).getBoundingClientRect();
+            return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+          };
+          return {map: rect('#map'), popup: rect('.leaflet-popup')};
+        }""")
+        for edge in ("left", "top"):
+            self.assertGreaterEqual(bounds["popup"][edge], bounds["map"][edge] - 1, bounds)
+        for edge in ("right", "bottom"):
+            self.assertLessEqual(bounds["popup"][edge], bounds["map"][edge] + 1, bounds)
+
+    def test_inventory_real_source_complete_lazy_toggle_desktop_mobile(self):
+        """INFO-03: complete decoded source inventory, lazy once, stable popup/focus."""
+        feature = self.inventory_bdl
+        self.assertEqual(feature["properties"]["inventory"], self.source_inventory)
+        self.assertRegex(self.manifest["inventoryVersion"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotEqual(self.manifest["inventoryVersion"], self.manifest["version"])
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                self.click_point(shape(feature["geometry"]).representative_point(), page)
+                self.choose(feature, page)
+                details = page.locator("details.inventory")
+                expect(details).to_have_count(1)
+                expect(details.locator("summary")).to_have_text("Opis taksacyjny \u00b7 BDL 2026")
+                self.assertFalse(details.evaluate("el => el.open"))
+                expect(page.locator(".inventory-content")).to_have_count(0)
+                self.assertTrue(details.evaluate("""el => {
+                  const detail = el.parentElement;
+                  return ['.source-label', 'h3', 'dl', 'small', '.primary'].every(selector => {
+                    const node = detail.querySelector(selector);
+                    return node && !el.contains(node) && !!(node.compareDocumentPosition(el) & 4);
+                  });
+                }"""))
+                before = self.saved(page)
+                page.evaluate("""() => {
+                  window.__testInventoryPopup = __testMap._popup;
+                  window.__testInventoryFocus = Object.values(__testMap._layers).find(layer =>
+                    layer instanceof L.GeoJSON && layer.options.style?.color === '#102bff').getLayers()[0];
+                  window.__testInventoryUpdates = 0;
+                  const original = __testInventoryPopup.update;
+                  __testInventoryPopup.update = function(...args) {
+                    __testInventoryUpdates++;
+                    return original.apply(this, args);
+                  };
+                }""")
+                content = None
+                for count, opened in enumerate((True, False, True), 1):
+                    details.locator("summary").click()
+                    page.wait_for_function("expected => document.querySelector('.inventory').open === expected",
+                                           arg=opened)
+                    page.wait_for_function("count => __testInventoryUpdates >= count", arg=count)
+                    self.assert_inventory(self.source_inventory, page)
+                    if content is None:
+                        content = page.locator(".inventory-content").element_handle()
+                    self.assertTrue(content.evaluate("el => el === document.querySelector('.inventory-content')"))
+                    self.assertTrue(page.evaluate("""() => __testMap._popup === __testInventoryPopup &&
+                      __testMap.hasLayer(__testInventoryPopup) && __testMap.hasLayer(__testInventoryFocus)"""))
+                    expect(page.locator('.result-button[aria-pressed="true"]')).to_have_count(1)
+                    expect(page.locator(".detail-view h3")).to_have_text(pretty(feature["properties"]["address"]))
+                    self.assert_active_object(None, page)
+                    self.assert_inventory_bounds(page)
+                    self.assertEqual(self.saved(page), before)
+                page.locator(".inventory-species h5").first.scroll_into_view_if_needed()
+                self.assert_inventory_bounds(page)
+                page.screenshot(path=str(SCREENSHOTS / f"pul-{'mobile' if mobile else 'desktop'}-inventory.png"), full_page=True)
+                content.dispose()
+                page.locator(".leaflet-popup-close-button").click(timeout=2000)
+                expect(page.locator(".leaflet-popup")).to_have_count(0)
+                self.assert_active_note(None, page)
+
+    def test_inventory_toggle_preserves_add_active_notes_edit_and_reload(self):
+        """INFO-03, NOTE-01, SEL-06, SAVE-01: disclosure never replaces selection/notes."""
+        feature = self.inventory_bdl
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                self.click_point(shape(feature["geometry"]).representative_point(), page)
+                self.choose(feature, page)
+                page.locator(".inventory summary").click()
+                expect(page.locator(".inventory-content")).to_have_count(1)
+                page.locator(".detail-view .primary").click()
+                self.wait_saved([{"id": feature["properties"]["id"], "source": "bdl", "note": ""}], page, exact_count=True)
+                self.assert_active_note(feature, page)
+                self.choose(feature, page)
+                expect(page.locator(".inventory-content")).to_have_count(0)
+                for opened in (True, False, True):
+                    page.locator(".inventory summary").click()
+                    page.wait_for_function("value => document.querySelector('.inventory').open === value", arg=opened)
+                    self.assert_active_note(feature, page)
+                    self.assert_active_object(None, page)
+                    popup_note = page.locator(".detail-view textarea")
+                    sidebar_note = page.locator(".entry.is-active textarea")
+                    popup_note.fill(f"Popup edit after toggle {opened}")
+                    expect(sidebar_note).to_have_value(f"Popup edit after toggle {opened}")
+                    sidebar_note.fill(f"List edit after toggle {opened}")
+                    expect(popup_note).to_have_value(f"List edit after toggle {opened}")
+                    self.wait_saved([{"id": feature["properties"]["id"], "source": "bdl",
+                                      "note": f"List edit after toggle {opened}"}], page, exact_count=True)
+                    self.assert_inventory_bounds(page)
+                page.locator(".leaflet-popup-close-button").click(timeout=2000)
+                expect(page.locator(".leaflet-popup")).to_have_count(0)
+                self.assert_active_note(None, page)
+                page.reload()
+                self.wait_ready(page)
+                page.locator("#list-tab").click()
+                expect(page.locator(".entry textarea")).to_have_value("List edit after toggle True")
+                self.assertEqual(json.loads(self.saved(page))["version"], self.manifest["version"])
+
+    def test_inventory_switch_result_collapses_and_never_joins_plan(self):
+        """INFO-03, SEL-04: neither exact-address nor spatial BULIG hits inherit BDL."""
+        for plan, bdl, point in ((self.plan, self.bdl, self.overlap),
+                                 (self.matched_plan, self.matched_bdl, None)):
+            with self.subTest(plan=plan["properties"]["id"]):
+                page = self.open_page()
+                if point is None:
+                    self.click_point(shape(bdl["geometry"]).representative_point(), page)
+                    self.choose(bdl, page)
+                    page.locator(".inventory summary").click()
+                    self.click_point(shape(plan["geometry"]).representative_point(), page)
+                else:
+                    self.click_point(point, page)
+                    self.choose(bdl, page)
+                    page.locator(".inventory summary").click()
+                    expect(page.locator(".inventory-content")).to_have_count(1)
+                    self.choose(plan, page)
+                    expect(page.locator(".inventory, .inventory-content, .inventory-layer")).to_have_count(0)
+                    self.choose(bdl, page)
+                    self.assertFalse(page.locator(".inventory").evaluate("el => el.open"))
+                    expect(page.locator(".inventory-content")).to_have_count(0)
+                self.choose(plan, page)
+                expect(page.locator(".inventory, .inventory-content, .inventory-layer")).to_have_count(0)
+                expect(page.locator(".detail-view")).not_to_contain_text("Wiek r\u0119bno\u015bci")
+                self.assert_active_object(plan, page)
+                expect(page.locator("#count")).to_have_text("0")
+                self.assertIsNone(self.saved(page))
+
+    def test_inventory_missing_empty_zero_and_decimal_fixture_in_memory_only(self):
+        """INFO-03: browser-only fixture keeps zeros, labels missing values, rounds pl-PL."""
+        feature = self.inventory_bdl
+        inventory = {"structure": "", "rotationAge": 0, "layers": [{
+            "code": "DRZEW", "name": "Test layer", "density": None, "mixture": "", "stocking": 0,
+            "species": [{"code": "SO", "name": "Test species", "age": 0, "share": "",
+                         "siteClass": None, "height": 12.346, "diameter": 12345.678},
+                        {"code": "BRZ", "name": "Missing species", "age": None, "share": None,
+                         "siteClass": "", "height": 0, "diameter": None}],
+        }]}
+        # Only the selected feature in the HTTP response is replaced. No disk writes.
+        payload = {"type": "FeatureCollection", "features": [
+            dict(f, properties=dict(f["properties"], inventory=inventory))
+            if f["properties"]["id"] == feature["properties"]["id"] else f
+            for f in self.features["bdl"]]}
+        self.page.route("**/layers/bdl.geojson", lambda route: route.fulfill(json=payload))
+        self.page.reload()
+        self.wait_ready()
+        self.click_point(shape(feature["geometry"]).representative_point())
+        self.choose(feature)
+        expect(self.page.locator(".inventory-content")).to_have_count(0)
+        self.page.locator(".inventory summary").click()
+        self.assert_inventory(inventory, self.page)
+        expect(self.page.locator(".inventory-content > dl > dd")).to_have_text(["Brak danych", "0"])
+        expect(self.page.locator(".inventory-species li").first.locator("dd")).to_have_text([
+            "Brak danych", "0", "Brak danych", "12,35", "12\u00a0345,68",
+        ])
 
     def test_geometry_area_in_bdl_and_plan_popup_and_format_boundaries(self):
         """INFO-02: the chosen element's numeric area, not a joined or harvested area."""

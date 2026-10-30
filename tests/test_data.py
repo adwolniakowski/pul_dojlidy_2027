@@ -1,11 +1,14 @@
 """Data acceptance tests; no app or remote-service tests are implied."""
 
 import importlib.util
+import csv
+import hashlib
 import json
 import math
 from collections import Counter
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import shapefile
 from pyproj import Transformer
@@ -192,14 +195,174 @@ class DataTests(unittest.TestCase):
 
     def test_reproducible_bytes_and_read_only_sources(self):
         before = pipeline.fingerprint()
+        inventory_before = pipeline.fingerprint(pipeline.inventory_source_files())
         layers, manifest = pipeline.build_layers()
         self.assertEqual(before, pipeline.fingerprint())
+        self.assertEqual(inventory_before, pipeline.fingerprint(pipeline.inventory_source_files()))
+        self.assertEqual(self.manifest["inventoryVersion"], inventory_before)
         self.assertEqual(self.manifest["version"], before)
         self.assertRegex(before, r"^sha256:[0-9a-f]{64}$")
         for name, value in {**layers, "manifest": manifest}.items():
             suffix = ".json" if name == "manifest" else ".geojson"
             expected = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
             self.assertEqual((pipeline.OUTPUT / (name + suffix)).read_bytes(), expected.encode("utf-8"))
+
+    def test_inventory_exact_source_mapping_all_records(self):
+        def read(filename):
+            with (pipeline.BDL / filename).open(encoding="utf-8-sig", newline="") as handle:
+                return list(csv.DictReader(handle, delimiter="\t"))
+
+        dictionaries = {
+            kind: {r[code].strip(): r[name].strip() for r in read(filename)}
+            for kind, (filename, code, name) in pipeline.INVENTORY_DICTIONARIES.items()}
+        subareas = {r["arodes_int_num"]: r for r in read("f_subarea.txt") if r["a_year"] == "2026"}
+        metadata, species = {}, {}
+        for r in read("f_arod_storey.txt"):
+            self.assertEqual(r["a_year"], "2026")
+            key = (r["arodes_int_num"], r["storey_cd"].strip())
+            self.assertNotIn(key, metadata)
+            metadata[key] = r
+        for r in read("f_storey_species.txt"):
+            self.assertEqual(r["a_year"], "2026")
+            species.setdefault((r["arodes_int_num"], r["storey_cd"].strip()), []).append(r)
+        numeric_coverage, shares = Counter(), Counter()
+        layer_count = species_count = 0
+        for feature in self.layers["bdl"]["features"]:
+            props = feature["properties"]
+            identifier, actual = props["id"], props["inventory"]
+            source = subareas[identifier]
+            self.assertEqual(set(actual), {"structure", "rotationAge", "layers"})
+            self.assertEqual(actual["structure"], source["stand_struct_cd"].strip() or None)
+            self.assertEqual(actual["rotationAge"], float(source["rotation_age"]) if source["rotation_age"].strip() else None)
+            keys = {k for k in metadata.keys() | species.keys() if k[0] == identifier}
+            ordered = sorted(keys, key=lambda k: (float(metadata[k]["st_rank_order_act"]) if k in metadata else math.inf, k[1]))
+            self.assertEqual([l["code"] for l in actual["layers"]], [k[1] for k in ordered])
+            for key, layer in zip(ordered, actual["layers"]):
+                layer_count += 1
+                self.assertEqual(set(layer), {"code", "name", "density", "mixture", "stocking", "species"})
+                self.assertEqual(layer["name"], dictionaries["storey"][key[1]])
+                meta = metadata.get(key, {})
+                for target, column, kind in (("density", "density_cd", "density"), ("mixture", "mixture_cd", "mixture")):
+                    self.assertEqual(layer[target], dictionaries[kind].get(meta.get(column, "").strip()))
+                raw = meta.get("standdensity_index", "").strip()
+                self.assertEqual(layer["stocking"], float(raw) if raw else None)
+                numeric_coverage["stocking", "blank" if not raw else "zero" if float(raw) == 0 else "value"] += 1
+                rows = sorted(species.get(key, []), key=lambda r: int(r["sp_rank_order_act"]))
+                self.assertEqual(len(layer["species"]), len(rows))
+                for row, item in zip(rows, layer["species"]):
+                    species_count += 1
+                    self.assertEqual(set(item), {"code", "name", "age", "share", "siteClass", "height", "diameter"})
+                    self.assertEqual(item["code"], row["species_cd"].strip())
+                    self.assertEqual(item["name"], dictionaries["species"][item["code"]])
+                    share = row["part_cd_act"].strip()
+                    shares[share] += 1
+                    self.assertEqual(item["share"], dictionaries["part"].get(share))
+                    self.assertEqual(item["siteClass"], row["site_class_cd"].strip() or None)
+                    for target, column in (("age", "species_age"), ("height", "height"), ("diameter", "bhd")):
+                        raw = row[column].strip()
+                        self.assertEqual(item[target], float(raw) if raw else None)
+                        numeric_coverage[target, "blank" if not raw else "zero" if float(raw) == 0 else "value"] += 1
+        ids = {f["properties"]["id"] for f in self.layers["bdl"]["features"]}
+        self.assertEqual(layer_count, sum(k[0] in ids for k in metadata.keys() | species.keys()))
+        self.assertEqual(species_count, sum(len(v) for k, v in species.items() if k[0] in ids))
+        self.assertEqual(layer_count, self.manifest["validation"]["inventory"]["publishedLayers"])
+        self.assertEqual(species_count, self.manifest["validation"]["inventory"]["publishedSpecies"])
+        self.assertGreater(shares["MJS"], 0)
+        self.assertGreater(shares["PJD"], 0)
+        self.assertGreater(shares[""], 0)
+        for field in ("stocking", "age", "height", "diameter"):
+            self.assertGreater(numeric_coverage[field, "blank"], 0)
+        # This source edition has no literal numeric zeros; exercise those below.
+        self.assertEqual(sum(numeric_coverage[field, "zero"] for field in ("stocking", "age", "height", "diameter")), 0)
+
+    def test_inventory_preserves_selection_and_existing_payload(self):
+        self.assertEqual(self.manifest["version"], "sha256:2e99b0b7e79dad47b7b2dcbe5ff69ab7c456ddd10cbcda534e0bf387ecd0b6c0")
+        original = json.loads(json.dumps(self.layers["bdl"]))
+        for feature in original["features"]:
+            del feature["properties"]["inventory"]
+        payload = json.dumps(original, ensure_ascii=False, separators=(",", ":")) + "\n"
+        self.assertEqual(hashlib.sha256(payload.encode()).hexdigest(), "68becf73894699bec8dab2b6b55f52e67e5ddae8c6b52cc09913d94153aeeede")
+        for name, expected in (("rozplan", "eb65fb9ee3355c174e4e753c66a6f42e42810ee49074f06786ae77a15b9a1e19"),
+                               ("boundary", "14bdca4356ca46ace250bef9ccd057162bca944564c38ac648c4bd2e97add9c1")):
+            self.assertEqual(hashlib.sha256((pipeline.OUTPUT / f"{name}.geojson").read_bytes()).hexdigest(), expected)
+            self.assertTrue(all("inventory" not in f["properties"] for f in self.layers[name]["features"]))
+
+    def test_inventory_provenance_includes_all_consumed_sources(self):
+        expected = {pipeline.BDL / n for n in (
+            "f_subarea.txt", "f_arod_storey.txt", "f_storey_species.txt", "f_storey_dic.txt",
+            "f_tree_species_dic.txt", "f_part_dic.txt", "f_density_dic.txt", "f_mixture_dic.txt")}
+        expected.update(pipeline.SOURCES["bdl"].with_suffix(e) for e in (".shp", ".shx", ".dbf", ".prj", ".cpg"))
+        self.assertEqual(set(pipeline.inventory_source_files()), expected)
+        self.assertEqual(self.manifest["inventorySources"], [p.relative_to(ROOT).as_posix() for p in sorted(expected)])
+        self.assertNotEqual(self.manifest["version"], self.manifest["inventoryVersion"])
+
+    def test_inventory_missing_metadata_and_ambiguous_sources(self):
+        original = pipeline.table_rows
+
+        def missing(filename):
+            rows = list(original(filename))
+            return rows[1:] if filename == "f_arod_storey.txt" else rows
+
+        with patch.object(pipeline, "table_rows", side_effect=missing):
+            inventory, validation = pipeline.build_inventory()
+        layer = next(l for l in inventory["108024116"]["layers"] if l["code"] == "DRZEW")
+        self.assertTrue(layer["species"])
+        self.assertEqual((layer["density"], layer["mixture"], layer["stocking"]), (None, None, None))
+        self.assertEqual(inventory["108024116"]["layers"][-1]["code"], "DRZEW")
+        self.assertEqual(validation["layersWithoutMetadata"], [{"id": "108024116", "code": "DRZEW"}])
+        for filename, message in (("f_subarea.txt", "Ambiguous inventory subarea"),
+                                  ("f_arod_storey.txt", "Ambiguous inventory storey"),
+                                  ("f_storey_dic.txt", "Ambiguous/empty inventory dictionary")):
+            def duplicate(name):
+                rows = list(original(name))
+                if name == filename:
+                    extra = dict(rows[0])
+                    if name == "f_storey_dic.txt":
+                        extra["storey_name"] = "conflicting label"
+                    rows.append(extra)
+                return rows
+            with patch.object(pipeline, "table_rows", side_effect=duplicate):
+                with self.assertRaisesRegex(ValueError, message):
+                    pipeline.build_inventory()
+
+    def test_inventory_blank_zero_invalid_numbers_and_unknown_codes(self):
+        self.assertIsNone(pipeline.inventory_number("  "))
+        self.assertEqual(pipeline.inventory_number("0"), 0)
+        for value in ("nan", "inf", "unknown"):
+            with self.assertRaises(ValueError):
+                pipeline.inventory_number(value)
+        original = pipeline.table_rows
+
+        def unknown(filename):
+            rows = list(original(filename))
+            if filename == "f_arod_storey.txt":
+                rows[0]["density_cd"] = "UNKNOWN"
+            return rows
+
+        with patch.object(pipeline, "table_rows", side_effect=unknown):
+            with self.assertRaisesRegex(ValueError, "Unknown inventory density code"):
+                pipeline.build_inventory()
+
+        def zero_numbers(filename):
+            rows = list(original(filename))
+            fields = {"f_subarea.txt": ("rotation_age",),
+                      "f_arod_storey.txt": ("standdensity_index",),
+                      "f_storey_species.txt": ("species_age", "height", "bhd")}.get(filename, ())
+            for row in rows:
+                for field in fields:
+                    if row[field].strip():
+                        row[field] = "0"
+            return rows
+
+        with patch.object(pipeline, "table_rows", side_effect=zero_numbers):
+            inventory, _ = pipeline.build_inventory()
+        items = list(inventory.values())
+        layers = [l for i in items for l in i["layers"]]
+        species = [s for l in layers for s in l["species"]]
+        for records, fields in ((items, ("rotationAge",)), (layers, ("stocking",)),
+                                (species, ("age", "height", "diameter"))):
+            for field in fields:
+                self.assertEqual({r[field] for r in records}, {0, None})
 
 
 if __name__ == "__main__":
