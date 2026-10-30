@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>PUL Dojlidy 2027-2037</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="vendor/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="vendor/leaflet.js"></script>
+  <script defer src="core.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div><h1>PUL Dojlidy 2027-2037<span class="edition">Wersja robocza</span></h1></div>
+    <button id="home" type="button">Całe nadleśnictwo</button>
+  </header>
+  <main>
+    <aside id="sidebar" aria-label="Warstwy i lista adresów">
+      <nav class="tabs" aria-label="Panele"><button id="layers-tab" aria-pressed="true" aria-controls="layers-panel">Warstwy</button><button id="list-tab" aria-pressed="false" aria-controls="list-panel">Uwagi <span id="count">0</span></button></nav>
+      <div id="warnings" role="alert" class="warnings" hidden></div>
+      <section id="layers-panel">
+        <fieldset><legend>01 / Podkład mapy</legend><div class="basemaps"><label><input type="radio" name="base" value="osm" checked> OpenStreetMap</label><label><input type="radio" name="base" value="ortho"> Ortofotomapa</label></div></fieldset>
+        <fieldset><legend>02 / Dane leśne</legend>
+          <label class="layer-row"><input id="bdl-visible" type="checkbox" checked><span>Wydzielenia BDL <small>Stan na 2026 rok</small></span></label>
+          <label class="layer-row"><input id="boundary-visible" type="checkbox" checked><span>Granica nadleśnictwa</span></label>
+          <label class="layer-row"><input id="mbdl-visible" type="checkbox"><span>mBDL na żywo <small>Oddziały i wydzielenia; widoczne po przybliżeniu</small></span></label>
+          <label class="layer-row"><input id="plan-visible" type="checkbox" checked><span>BULIG <small>Plan rębni</small></span></label>
+          <label class="color-label" for="color-mode">Kolorowanie</label>
+          <select id="color-mode">
+            <option value="percent" selected>Procent pozyskania</option>
+            <option value="type">Rodzaj rębni</option>
+          </select>
+          <div id="plan-legend" class="plan-legend" aria-live="polite"></div>
+          <p class="filter-caption">Rodzaj rębni <span id="visible-count"></span></p>
+          <div class="filter-actions"><button id="all-types" type="button">Wszystkie</button><button id="no-types" type="button">Żadne</button></div>
+          <div id="types" aria-label="Filtr rodzajów rębni"></div>
+        </fieldset>
+        <details class="sources">
+          <summary>Źródła</summary>
+          <p>BDL: Bank Danych o Lasach / Lasy Państwowe. Stan 2026, wytworzenie 23.06.2026.</p>
+          <p>OSM: © OpenStreetMap contributors.</p>
+          <p>Ortofotomapa: GUGiK / Geoportal.</p>
+        </details>
+      </section>
+      <section id="list-panel" hidden>
+        <div id="entries"></div>
+        <button id="clear-list" class="danger" type="button">Wyczyść listę</button>
+      </section>
+    </aside>
+    <section class="map-shell" aria-label="Mapa konsultacji">
+      <div id="map" aria-label="Mapa wydzieleń i planu rębni"></div>
+      <div class="map-caption"><span class="dot"></span> Dojlidy <span>Plan 2027–2037 · dane BDL 2026</span></div>
+      <div id="status" role="status" class="map-status">Wczytywanie lokalnych danych…</div>
+    </section>
+  </main>
+</body>
+</html>

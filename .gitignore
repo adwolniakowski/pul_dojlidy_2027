@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local source and generated GIS data are deliberately not versioned.
+/data/
+/web/layers/
+/glosowanie_maj_2026-main/
+
+.env
+.env.*
+!.env.example
+*.log
