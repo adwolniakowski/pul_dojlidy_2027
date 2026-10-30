@@ -1,7 +1,7 @@
 /* Local selection never relies on the drawing order of overlays. */
 (async () => {
   const $ = id => document.getElementById(id);
-  const {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toMarkdown} = PulCore;
+  const {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toPlainText} = PulCore;
   const warnings = new Map();
   function warn(key, text) {
     if (text) warnings.set(key, text); else warnings.delete(key);
@@ -172,7 +172,7 @@
   }
   function renderList() {
     $('count').textContent = entries.length;
-    $('export-markdown').disabled = entries.length === 0;
+    $('export-text').disabled = entries.length === 0;
     const container = $('entries'); container.replaceChildren();
     if (!entries.length) container.append(node('p', 'Lista jest pusta. Kliknij obiekt na mapie i wybierz „Dodaj ten adres do listy”.', 'empty'));
     for (const entry of entries) {
@@ -209,11 +209,11 @@
     if (!confirm('Usunąć całą listę i wszystkie notatki z tej przeglądarki?')) return;
     entries = []; blocked = false; persist(true); renderList(); map.closePopup();
   };
-  $('export-markdown').onclick = () => {
+  $('export-text').onclick = () => {
     if (!entries.length) return;
-    const url = URL.createObjectURL(new Blob([toMarkdown(entries)], {type: 'text/markdown;charset=utf-8'}));
+    const url = URL.createObjectURL(new Blob([toPlainText(entries)], {type: 'text/plain;charset=utf-8'}));
     const link = document.createElement('a');
-    link.href = url; link.download = 'uwagi-pul-dojlidy.md';
+    link.href = url; link.download = 'uwagi-pul-dojlidy.txt';
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };

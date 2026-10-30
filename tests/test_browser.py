@@ -1010,15 +1010,15 @@ class BrowserTests(unittest.TestCase):
         self.assert_active_note(None, page)
         self.assert_active_object(None, page)
 
-    def assert_markdown_download(self, entries, page):
-        expected = "# Uwagi do PUL Dojlidy 2027-2037\n\n" + "".join(
-            f"## {pretty(e['address'])}\n\n{e['note'] if e['note'].strip() else 'Brak notatki.'}\n\n"
+    def assert_text_download(self, entries, page):
+        expected = "Uwagi do PUL Dojlidy 2027-2037\n\n" + "".join(
+            f"Adres leśny: {pretty(e['address'])}\n\n{e['note'] if e['note'].strip() else 'Brak notatki.'}\n\n"
             for e in entries)
         before = self.saved(page)
-        self.assertEqual(page.evaluate("entries => PulCore.toMarkdown(entries)", entries), expected)
-        self.assertEqual(page.evaluate("entries => { const before = JSON.stringify(entries); PulCore.toMarkdown(entries); return JSON.stringify(entries) === before; }", entries), True)
+        self.assertEqual(page.evaluate("entries => PulCore.toPlainText(entries)", entries), expected)
+        self.assertEqual(page.evaluate("entries => { const before = JSON.stringify(entries); PulCore.toPlainText(entries); return JSON.stringify(entries) === before; }", entries), True)
         page.locator("#list-tab").click()
-        expect(page.locator("#export-markdown")).to_be_enabled()
+        expect(page.locator("#export-text")).to_be_enabled()
         page.wait_for_load_state("networkidle")
         requests = []
         listener = lambda request: requests.append(request.url)
@@ -1032,13 +1032,13 @@ class BrowserTests(unittest.TestCase):
         }""")
         try:
             with page.expect_download() as pending:
-                page.locator("#export-markdown").click()
+                page.locator("#export-text").click()
             download = pending.value
-            self.assertEqual(download.suggested_filename, "uwagi-pul-dojlidy.md")
+            self.assertEqual(download.suggested_filename, "uwagi-pul-dojlidy.txt")
             self.assertTrue(download.url.startswith("blob:"), download.url)
             self.assertIsNone(download.failure())
             self.assertEqual(Path(download.path()).read_bytes(), expected.encode("utf-8"))
-            self.assertEqual(page.evaluate("window.__testExportType"), "text/markdown;charset=utf-8")
+            self.assertEqual(page.evaluate("window.__testExportType"), "text/plain;charset=utf-8")
             page.wait_for_load_state("networkidle")
             self.assertEqual(requests, [], "Export must not make local or outbound HTTP requests")
             self.assertEqual(self.saved(page), before)
@@ -1047,36 +1047,36 @@ class BrowserTests(unittest.TestCase):
         finally:
             page.remove_listener("request", listener)
 
-    def test_markdown_download_all_entries_raw_notes_empty_reload_and_removal(self):
-        """Markdown export: bytes, insertion order, hidden data, blank and raw Unicode notes."""
+    def test_text_download_all_entries_raw_notes_empty_reload_and_removal(self):
+        """Plain text export: bytes, insertion order, hidden data, blank and Unicode notes."""
         for mobile in (False, True):
             with self.subTest(mobile=mobile):
                 page = self.open_page(mobile=True) if mobile else self.page
                 page.locator("#list-tab").click()
-                expect(page.locator("#export-markdown")).to_be_disabled()
+                expect(page.locator("#export-text")).to_be_disabled()
                 features = [self.plan, self.bdl, self.matched_bdl]
                 self.assertEqual(len({address_key(f["properties"]["address"]) for f in features}), 3)
                 notes = ["  # Za\u017c\u00f3\u0142\u0107 **g\u0119\u015bl\u0105**\n\n- [link](https://example.invalid)\n`kod` <tag> & | \\\nKoniec  \n", " \t\n  ", ""]
                 entries = self.load_entries(features, notes, page)
                 page.locator("#no-types").click()
                 page.locator("#bdl-visible").uncheck()
-                self.assert_markdown_download(entries, page)
+                self.assert_text_download(entries, page)
                 page.reload()
                 self.wait_ready(page)
-                self.assert_markdown_download(entries, page)
+                self.assert_text_download(entries, page)
                 for remaining in (2, 1, 0):
                     page.locator(".entry").first.get_by_role("button", name="Usu\u0144", exact=True).click()
                     self.wait_saved(entries[3 - remaining:], page, exact_count=True)
                     if remaining:
-                        expect(page.locator("#export-markdown")).to_be_enabled()
+                        expect(page.locator("#export-text")).to_be_enabled()
                     else:
-                        expect(page.locator("#export-markdown")).to_be_disabled()
+                        expect(page.locator("#export-text")).to_be_disabled()
                 page.reload()
                 self.wait_ready(page)
                 page.locator("#list-tab").click()
-                expect(page.locator("#export-markdown")).to_be_disabled()
+                expect(page.locator("#export-text")).to_be_disabled()
 
-    def test_markdown_export_recovers_in_memory_notes_when_storage_conflicts(self):
+    def test_text_export_recovers_in_memory_notes_when_storage_conflicts(self):
         """Export stays available during SAVE-01 conflict without touching newer storage."""
         entries = self.load_entries([self.plan], ["Local recovery\n**keep me**"], self.page)
         newer = self.page.context.new_page()
@@ -1088,7 +1088,7 @@ class BrowserTests(unittest.TestCase):
         latest = self.wait_saved([{"note": "Newer persisted note"}], newer)
         expect(self.page.locator("#warnings")).to_contain_text("Lista zmieni\u0142a si\u0119 w innej karcie")
         expect(self.page.locator(".entry textarea")).to_be_disabled()
-        self.assert_markdown_download(entries, self.page)
+        self.assert_text_download(entries, self.page)
         self.assertEqual(self.saved(), latest)
 
     def test_duplicate_address_note_edit_clear_and_reload(self):

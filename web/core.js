@@ -21,9 +21,9 @@ window.PulCore = (() => {
     if (areaHa > 0 && areaHa < 0.01) return '< 0,01 ha';
     return new Intl.NumberFormat('pl-PL', {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(areaHa) + ' ha';
   }
-  function toMarkdown(entries) {
-    return '# Uwagi do PUL Dojlidy 2027-2037\n\n' + entries.map(entry =>
-      `## ${prettyAddress(entry.address)}\n\n${entry.note.trim() ? entry.note : 'Brak notatki.'}\n\n`
+  function toPlainText(entries) {
+    return 'Uwagi do PUL Dojlidy 2027-2037\n\n' + entries.map(entry =>
+      `Adres leśny: ${prettyAddress(entry.address)}\n\n${entry.note.trim() ? entry.note : 'Brak notatki.'}\n\n`
     ).join('');
   }
   function ringContains(ring, x, y) {
@@ -56,5 +56,5 @@ window.PulCore = (() => {
     }
     return saved.entries;
   }
-  return {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toMarkdown};
+  return {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toPlainText};
 })();

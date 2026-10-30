@@ -13,7 +13,7 @@
 .object-button.is-active{border-color:#102bff;box-shadow:inset 3px 0 #102bff}
 .object-button.is-active strong{color:#102b9c}
 .entry.is-active{border-color:#102bff;box-shadow:inset 3px 0 #102bff}
-#export-markdown{width:100%;margin:12px 0 4px;font-size:12px}
+#export-text{width:100%;margin:12px 0 4px;font-size:12px}
 .inventory{border-top:1px solid var(--line);padding-top:12px}
 .inventory summary{font-size:12px}
 .inventory-layer h4{font-size:13px;margin:12px 0 6px;overflow-wrap:anywhere}
