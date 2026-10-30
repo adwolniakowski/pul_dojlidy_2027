@@ -2,10 +2,15 @@
 __pycache__/
 *.pyc
 
-# Local source and generated GIS data are deliberately not versioned.
+# Original source data and the reference map remain local.
 /data/
-/web/layers/
 /glosowanie_maj_2026-main/
+
+# Local project documentation stays on disk, outside repository history.
+/AGENTS.md
+/README.md
+/SPECYFIKACJA.md
+/STATUS.md
 
 .env
 .env.*
