@@ -60,8 +60,8 @@
   const [manifest, bdl, rozplan, boundary] = data;
   const featureIndex = new Map([...bdl.features, ...rozplan.features].map(f => [`${f.properties.source}:${f.properties.id}`, f]));
   let colorMode = 'percent';
-  let planTransparency = 30;
-  const planStyle = f => ({color: planColor(f.properties, colorMode), weight: 1.4, fillOpacity: 1 - planTransparency / 100});
+  let planTransparency = 70;
+  const planStyle = f => ({color: planColor(f.properties, colorMode), weight: 1.4, fillOpacity: (100 - planTransparency) / 100});
   let enabledTypes = new Set(manifest.types);
   let activeObjectId = null;
   let activeAddressKey = null;

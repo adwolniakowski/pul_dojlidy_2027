@@ -1534,7 +1534,8 @@ class BrowserTests(unittest.TestCase):
         page = self.page
         slider = page.locator("#plan-transparency")
         expect(slider).to_be_enabled()
-        expect(slider).to_have_value("30")
+        expect(slider).to_have_value("70")
+        expect(page.locator(".transparency-label")).to_have_text("Przezroczystość 70%")
         def opacity():
             return page.evaluate("""() => {
               let values = [];
@@ -1544,7 +1545,7 @@ class BrowserTests(unittest.TestCase):
               });
               return [...new Set(values)];
             }""")
-        self.assertEqual(opacity(), [0.7])
+        self.assertEqual(opacity(), [0.3])
         self.click_point()
         self.choose(self.plan)
         page.locator("#layers-tab").click()
@@ -1565,8 +1566,8 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(opacity(), [0])
         page.reload()
         self.wait_ready(page)
-        expect(slider).to_have_value("30")
-        self.assertEqual(opacity(), [0.7])
+        expect(slider).to_have_value("70")
+        self.assertEqual(opacity(), [0.3])
 
     def plan_styles(self, page=None):
         """Inspect the thematic GeoJSON, not saved/focus copies of its features."""
