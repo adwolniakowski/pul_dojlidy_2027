@@ -1,7 +1,7 @@
 /* Local selection never relies on the drawing order of overlays. */
 (async () => {
   const $ = id => document.getElementById(id);
-  const {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea} = PulCore;
+  const {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toMarkdown} = PulCore;
   const warnings = new Map();
   function warn(key, text) {
     if (text) warnings.set(key, text); else warnings.delete(key);
@@ -36,12 +36,14 @@
   });
   $('mbdl-visible').onchange = e => { if (e.target.checked) mbdl.addTo(map); else { map.removeLayer(mbdl); warn('mBDL', null); } };
   function panel(name) {
-    for (const value of ['layers', 'list']) {
+    for (const value of ['layers', 'objects', 'list']) {
       $(`${value}-panel`).hidden = name !== value;
       $(`${value}-tab`).setAttribute('aria-pressed', String(name === value));
     }
+    scrollActiveEntry();
   }
   $('layers-tab').onclick = () => panel('layers');
+  $('objects-tab').onclick = () => panel('objects');
   $('list-tab').onclick = () => panel('list');
   let data;
   try {
@@ -60,6 +62,8 @@
   let colorMode = 'percent';
   const planStyle = f => ({color: planColor(f.properties, colorMode), weight: 1.4, fillOpacity: .55});
   let enabledTypes = new Set(manifest.types);
+  let activeObjectId = null;
+  let activeAddressKey = null;
   const selected = L.geoJSON(null, {interactive: false, style: {color: '#f4b526', weight: 4, fillOpacity: .05}}).addTo(map);
   const focus = L.geoJSON(null, {interactive: false, style: {color: '#102bff', weight: 4, fillOpacity: .13, dashArray: '7 4'}}).addTo(map);
   const bdlLayer = L.geoJSON(bdl, {interactive: false, style: {color: '#345b46', weight: .8, fillOpacity: .025}}).addTo(map);
@@ -114,12 +118,66 @@
     }
     selected.bringToFront(); focus.bringToFront();
   }
+  function scrollActiveEntry() {
+    const sidebar = $('sidebar');
+    const active = sidebar.querySelector('section:not([hidden]) .is-active');
+    if (!active) return;
+    // Scroll only the sidebar, not the document or the map on mobile.
+    const bounds = sidebar.getBoundingClientRect();
+    const top = bounds.top + sidebar.querySelector('.tabs').getBoundingClientRect().height + 8;
+    const bottom = bounds.bottom - 8;
+    const item = active.getBoundingClientRect();
+    if (item.top < top || item.height > bottom - top) sidebar.scrollTop += item.top - top;
+    else if (item.bottom > bottom) sidebar.scrollTop += item.bottom - bottom;
+  }
+  function updateObjectStates(scroll = false) {
+    const savedAddresses = new Set(entries.map(entry => entry.key));
+    document.querySelectorAll('.object-button').forEach(item => {
+      const active = item.dataset.objectId === activeObjectId;
+      const saved = savedAddresses.has(item.dataset.addressKey);
+      item.classList.toggle('is-active', active);
+      item.classList.toggle('is-saved', saved);
+      item.setAttribute('aria-pressed', String(active));
+      item.querySelector('.object-saved').hidden = !saved;
+    });
+    document.querySelectorAll('.entry').forEach(card => {
+      const active = card.dataset.addressKey === activeAddressKey;
+      card.classList.toggle('is-active', active);
+      if (active) card.setAttribute('aria-current', 'true'); else card.removeAttribute('aria-current');
+    });
+    if (scroll) scrollActiveEntry();
+  }
+  function renderObjects() {
+    const visible = $('plan-visible').checked ? rozplan.features.filter(f => enabledTypes.has(f.properties.type)) : [];
+    const collator = new Intl.Collator('pl', {numeric: true});
+    visible.sort((a, b) => collator.compare(addressKey(a.properties.address), addressKey(b.properties.address)) || collator.compare(a.properties.compartment, b.properties.compartment) || collator.compare(a.properties.id, b.properties.id));
+    $('objects-count').textContent = `Obiekty BULIG: ${visible.length}`;
+    $('objects-empty').hidden = visible.length > 0;
+    $('objects-empty').textContent = $('plan-visible').checked ? 'Brak obiektów dla wybranych rodzajów rębni.' : 'Włącz warstwę BULIG w zakładce „Warstwy”.';
+    const list = document.createDocumentFragment();
+    for (const feature of visible) {
+      const p = feature.properties;
+      const item = button('', () => {
+        const bounds = L.geoJSON(feature).getBounds();
+        map.fitBounds(bounds, {padding: [35, 35], maxZoom: 17});
+        showResults([feature], bounds.getCenter());
+      }, 'object-button');
+      item.dataset.objectId = p.id;
+      item.dataset.addressKey = addressKey(p.address);
+      item.append(node('strong', prettyAddress(p.address)), node('span', `${p.type} · ${p.percent}% · działka ${p.compartment}`, 'object-meta'), node('span', 'W uwagach', 'object-saved'));
+      const row = node('li'); row.append(item); list.append(row);
+    }
+    $('objects-list').replaceChildren(list);
+    updateObjectStates();
+  }
   function renderList() {
     $('count').textContent = entries.length;
+    $('export-markdown').disabled = entries.length === 0;
     const container = $('entries'); container.replaceChildren();
     if (!entries.length) container.append(node('p', 'Lista jest pusta. Kliknij obiekt na mapie i wybierz „Dodaj ten adres do listy”.', 'empty'));
     for (const entry of entries) {
       const card = node('article', undefined, 'entry');
+      card.dataset.addressKey = entry.key;
       card.append(node('h3', prettyAddress(entry.address)), node('small', entry.source === 'bdl' ? 'Źródło adresu: BDL 2026' : 'Źródło adresu: BULIG'));
       const label = node('label', 'Twoja notatka');
       const text = node('textarea'); text.value = entry.note; text.disabled = blocked; text.setAttribute('aria-label', `Notatka: ${prettyAddress(entry.address)}`);
@@ -138,10 +196,19 @@
       card.append(actions); container.append(card);
     }
     drawSelection();
+    updateObjectStates();
   }
   $('clear-list').onclick = () => {
     if (!confirm('Usunąć całą listę i wszystkie notatki z tej przeglądarki?')) return;
     entries = []; blocked = false; persist(true); renderList(); map.closePopup();
+  };
+  $('export-markdown').onclick = () => {
+    if (!entries.length) return;
+    const url = URL.createObjectURL(new Blob([toMarkdown(entries)], {type: 'text/markdown;charset=utf-8'}));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'uwagi-pul-dojlidy.md';
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   function add(feature) {
     if (blocked) return;
@@ -161,9 +228,12 @@
       const p = feature.properties;
       for (const [btn, f] of resultButtons) btn.setAttribute('aria-pressed', String(f === feature));
       focus.clearLayers(); focus.addData(feature); focus.bringToFront();
+      activeObjectId = p.source === 'rozplan' ? p.id : null;
+      activeAddressKey = addressKey(p.address);
+      updateObjectStates(true);
       detail.replaceChildren(node('div', p.source === 'bdl' ? 'BDL · stan na 2026 rok' : 'BULIG · plan rębni', 'source-label'), node('h3', prettyAddress(p.address)));
       const dl = node('dl');
-      const rows = [['Powierzchnia elementu', formatArea(p.areaHa)], ...(p.source === 'bdl' ? Object.entries(p.details || {}) : [['Rodzaj rębni', p.type], ['Planowane pozyskanie', `${p.percent}%`], ['Oznaczenie źródłowe', p.original]])];
+      const rows = [['Powierzchnia elementu', formatArea(p.areaHa)], ...(p.source === 'bdl' ? Object.entries(p.details || {}) : [['Rodzaj rębni', p.type], ['Planowane pozyskanie', `${p.percent}%`]])];
       for (const [name, value] of rows) dl.append(node('dt', name), node('dd', value === '' || value == null ? 'Brak danych' : String(value)));
       detail.append(dl);
       const existing = entries.find(e => e.key === addressKey(p.address));
@@ -198,7 +268,7 @@
     popup.setLatLng(latlng).setContent(root).openOn(map);
     if (hits.length === 1) choose(hits[0]);
   }
-  map.on('popupclose', () => focus.clearLayers());
+  map.on('popupclose', () => { focus.clearLayers(); activeObjectId = null; activeAddressKey = null; updateObjectStates(); });
   map.on('click', e => {
     const hits = [];
     if ($('bdl-visible').checked) hits.push(...bdl.features.filter(f => contains(f, e.latlng.lng, e.latlng.lat)));
@@ -223,6 +293,7 @@
       group.input.indeterminate = count > 0 && count < group.types.length;
     }
     drawSelection();
+    renderObjects();
   }
   const filterGroups = [
     {id: 'clearcut', label: 'Zupełne', types: manifest.types.filter(type => typeFamily(type) === 'I')},

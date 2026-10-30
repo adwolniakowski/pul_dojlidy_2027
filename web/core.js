@@ -3,11 +3,11 @@ window.PulCore = (() => {
   const addressKey = value => value.replace(/\s+/g, '');
   const prettyAddress = value => value.split('-').map(part => part.trim()).join('-');
   const typeFamilies = [
-    {code: 'I', label: 'Zupełne', color: '#b8d8e8'},
-    {code: 'II', label: 'Częściowe', color: '#80b9d3'},
-    {code: 'III', label: 'Gniazdowe', color: '#4c95b5'},
-    {code: 'IV', label: 'Stopniowe', color: '#296f91'},
-    {code: 'V', label: 'Przerębowe', color: '#164864'},
+    {code: 'I', label: 'Zupełne', color: '#c6323e'},
+    {code: 'II', label: 'Częściowe', color: '#c7a4dc'},
+    {code: 'III', label: 'Gniazdowe', color: '#a878c3'},
+    {code: 'IV', label: 'Stopniowe', color: '#8651a6'},
+    {code: 'V', label: 'Przerębowe', color: '#5c2e7e'},
   ];
   const typeFamily = type => type.match(/^(III|II|IV|V|I)/)?.[0];
   function planColor(properties, mode) {
@@ -20,6 +20,11 @@ window.PulCore = (() => {
     if (!Number.isFinite(areaHa) || areaHa < 0) return 'Brak danych';
     if (areaHa > 0 && areaHa < 0.01) return '< 0,01 ha';
     return new Intl.NumberFormat('pl-PL', {minimumFractionDigits: 2, maximumFractionDigits: 2}).format(areaHa) + ' ha';
+  }
+  function toMarkdown(entries) {
+    return '# Uwagi do PUL Dojlidy 2027-2037\n\n' + entries.map(entry =>
+      `## ${prettyAddress(entry.address)}\n\n${entry.note.trim() ? entry.note : 'Brak notatki.'}\n\n`
+    ).join('');
   }
   function ringContains(ring, x, y) {
     let inside = false;
@@ -51,5 +56,5 @@ window.PulCore = (() => {
     }
     return saved.entries;
   }
-  return {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea};
+  return {addressKey, prettyAddress, contains, readSaved, typeFamilies, typeFamily, planColor, formatArea, toMarkdown};
 })();

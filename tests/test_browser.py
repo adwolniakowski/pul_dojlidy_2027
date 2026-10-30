@@ -9,6 +9,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import threading
 import unittest
 from urllib.parse import urlsplit
@@ -316,6 +317,230 @@ class BrowserTests(unittest.TestCase):
                 for edge in ("right", "bottom"):
                     self.assertLessEqual(bounds["popup"][edge], bounds["map"][edge] + 1, bounds)
 
+    def assert_objects(self, features, page):
+        expect(page.locator("#objects-count")).to_have_text(f"Obiekty BULIG: {len(features)}")
+        rows = page.locator("#objects-list .object-button").evaluate_all("""els => els.map(el => ({
+          id: el.dataset.objectId, key: el.dataset.addressKey,
+          address: el.querySelector('strong').textContent,
+          meta: el.querySelector('.object-meta').textContent
+        }))""")
+        expected = {f["properties"]["id"]: f["properties"] for f in features}
+        self.assertCountEqual([row["id"] for row in rows], expected)
+        keys = [row["key"] for row in rows]
+        self.assertEqual(keys, sorted(keys, key=lambda key: [
+            int(part) if part.isdigit() else part for part in re.split(r"(\d+)", key)
+        ]))
+        for row in rows:
+            p = expected[row["id"]]
+            self.assertEqual(row, {
+                "id": p["id"], "key": address_key(p["address"]),
+                "address": pretty(p["address"]),
+                "meta": f"{p['type']} \u00b7 {p['percent']:g}% \u00b7 dzia\u0142ka {p['compartment']}",
+            })
+        if features:
+            expect(page.locator("#objects-empty")).to_be_hidden()
+        else:
+            expect(page.locator("#objects-empty")).to_be_visible()
+
+    def assert_active_object(self, feature, page):
+        active = page.locator(".object-button.is-active")
+        pressed = page.locator('.object-button[aria-pressed="true"]')
+        if feature is None:
+            expect(active).to_have_count(0)
+            expect(pressed).to_have_count(0)
+            return
+        expect(active).to_have_count(1)
+        expect(active).to_have_attribute("data-object-id", feature["properties"]["id"])
+        expect(pressed).to_have_count(1)
+        expect(active).to_have_attribute("aria-pressed", "true")
+        focused = page.evaluate("""() => {
+          const features = [];
+          __testMap.eachLayer(layer => {
+            if (layer instanceof L.GeoJSON && layer.options.style?.color === '#102bff')
+              features.push(...layer.getLayers().map(child => child.feature));
+          });
+          return features;
+        }""")
+        self.assertEqual([f["properties"]["id"] for f in focused], [feature["properties"]["id"]])
+        self.assertEqual(focused[0]["geometry"], feature["geometry"])
+
+    def test_objects_filters_counts_rows_groups_visibility_and_extent(self):
+        """OBJ-01: all BULIG features, numeric addresses, filters but not extent/BDL."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                self.assertEqual(page.locator(".tabs button").evaluate_all(
+                    "els => els.map(el => el.id)"), ["layers-tab", "objects-tab", "list-tab"])
+                expect(page.locator("#layers-tab")).to_have_text("Warstwy")
+                expect(page.locator("#objects-tab")).to_have_text("Obiekty")
+                expect(page.locator("#list-tab")).to_contain_text("Uwagi")
+                page.locator("#objects-tab").click()
+                expect(page.locator("#objects-panel")).to_be_visible()
+                self.assert_objects(self.features["rozplan"], page)
+                self.assert_no_overflow(page)
+                page.evaluate("__testMap.setView([0, 0], 18, {animate: false})")
+                self.wait_map_idle(page)
+                self.assert_objects(self.features["rozplan"], page)
+                page.locator("#layers-tab").click()
+                page.locator("#bdl-visible").uncheck()
+                page.locator("#objects-tab").click()
+                self.assert_objects(self.features["rozplan"], page)
+                for group in ("clearcut", "complex"):
+                    page.locator("#layers-tab").click()
+                    page.locator("#no-types").click()
+                    page.locator(f'[data-group="{group}"]').check()
+                    symbols = ("IA", "IB") if group == "clearcut" else tuple(
+                        t for t in self.manifest["types"] if t not in ("IA", "IB"))
+                    page.locator("#objects-tab").click()
+                    self.assert_objects([f for f in self.features["rozplan"]
+                                         if f["properties"]["type"] in symbols], page)
+                page.locator("#layers-tab").click()
+                page.locator("#no-types").click()
+                for symbol in ("IB", "IIAU"):
+                    page.locator(f'[data-type="{symbol}"]').check()
+                page.locator("#objects-tab").click()
+                self.assert_objects([f for f in self.features["rozplan"]
+                                     if f["properties"]["type"] in ("IB", "IIAU")], page)
+                page.locator("#layers-tab").click()
+                page.locator("#no-types").click()
+                page.locator("#objects-tab").click()
+                self.assert_objects([], page)
+                page.locator("#layers-tab").click()
+                page.locator("#all-types").click()
+                page.locator("#plan-visible").uncheck()
+                page.locator("#objects-tab").click()
+                self.assert_objects([], page)
+                page.locator("#layers-tab").click()
+                page.locator("#plan-visible").check()
+                page.locator("#objects-tab").click()
+                self.assert_objects(self.features["rozplan"], page)
+                expect(page.locator("#count")).to_have_text("0")
+
+    def test_objects_click_zoom_single_popup_repeated_address_and_map_choice(self):
+        """OBJ-02: explicit per-feature activation, zoom, popup choice and close."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                before = self.saved(page)
+                page.locator("#objects-tab").click()
+                page.evaluate("""() => {
+                  __testMap.setView([0, 0], 4, {animate: false});
+                  const original = __testMap.fitBounds;
+                  window.__testFits = [];
+                  __testMap.fitBounds = function(bounds, options) {
+                    __testFits.push(bounds.toBBoxString());
+                    return original.call(this, bounds, options);
+                  };
+                }""")
+                for feature in self.repeated_plan[:2]:
+                    p = feature["properties"]
+                    page.locator(f'.object-button[data-object-id="{p["id"]}"]').click()
+                    self.wait_map_idle(page)
+                    expect(page.locator(".leaflet-popup")).to_have_count(1)
+                    expect(page.locator(".popup section")).to_have_count(1)
+                    expect(page.locator(".result-button")).to_have_count(1)
+                    expect(page.locator('.result-button[aria-pressed="true"]')).to_have_count(1)
+                    expect(page.locator(".detail-view .source-label")).to_have_text("BULIG \u00b7 plan r\u0119bni")
+                    expect(page.locator(".detail-view h3")).to_have_text(pretty(p["address"]))
+                    expect(page.locator("#objects-tab")).to_have_attribute("aria-pressed", "true")
+                    expect(page.locator("#objects-panel")).to_be_visible()
+                    self.assert_active_object(feature, page)
+                    self.assertTrue(page.evaluate("""feature => {
+                      const bounds = L.geoJSON(feature).getBounds();
+                      return __testFits.at(-1) === bounds.toBBoxString() &&
+                        __testMap.getBounds().intersects(bounds) && __testMap.getZoom() > 4;
+                    }""", feature))
+                    expect(page.locator("#count")).to_have_text("0")
+                    self.assertEqual(self.saved(page), before)
+                    self.assert_no_overflow(page)
+                page.locator(".leaflet-popup-close-button").click()
+                self.assert_active_object(None, page)
+                self.click_point(page=page)
+                self.choose(self.plan, page)
+                self.assert_active_object(self.plan, page)
+                self.choose(self.bdl, page)
+                self.assert_active_object(None, page)
+                expect(page.locator("#objects-tab")).to_have_attribute("aria-pressed", "true")
+                self.assertEqual(self.saved(page), before)
+
+    def test_objects_saved_addresses_blank_notes_bdl_removal_reset_and_reload(self):
+        """OBJ-03: saved state depends only on address membership, not note/source."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                repeated = self.repeated_plan[0]
+                for feature in (repeated, self.matched_bdl):
+                    self.click_point(shape(feature["geometry"]).representative_point(), page)
+                    self.choose(feature, page)
+                    page.locator(".detail-view .primary").click()
+                    self.wait_saved([{"id": feature["properties"]["id"], "note": ""}], page)
+                keys = {address_key(f["properties"]["address"]) for f in (repeated, self.matched_bdl)}
+                expected_ids = {f["properties"]["id"] for f in self.features["rozplan"]
+                                if address_key(f["properties"]["address"]) in keys}
+                saved_rows = page.locator(".object-button.is-saved")
+                for note in ("", "   \n  ", "A note", ""):
+                    for editor in page.locator(".entry textarea").all():
+                        editor.fill(note)
+                    self.wait_saved([{"id": f["properties"]["id"], "note": note}
+                                     for f in (repeated, self.matched_bdl)], page, exact_count=True)
+                    page.locator("#objects-tab").click()
+                    self.assertCountEqual(saved_rows.evaluate_all("els => els.map(el => el.dataset.objectId)"), expected_ids)
+                    expect(page.locator(".object-saved:visible")).to_have_text(["W uwagach"] * len(expected_ids))
+                    expect(page.locator(".object-button:not(.is-saved) .object-saved:visible")).to_have_count(0)
+                    page.locator("#list-tab").click()
+                page.reload()
+                self.wait_ready(page)
+                page.locator("#objects-tab").click()
+                self.assertCountEqual(saved_rows.evaluate_all("els => els.map(el => el.dataset.objectId)"), expected_ids)
+                self.assert_active_object(None, page)
+                page.locator(f'.object-button[data-object-id="{repeated["properties"]["id"]}"]').click()
+                self.wait_map_idle(page)
+                self.assert_active_object(repeated, page)
+                for mode in ("type", "percent"):
+                    page.locator("#layers-tab").click()
+                    page.locator("#color-mode").select_option(mode)
+                    page.locator("#objects-tab").click()
+                    self.assert_active_object(repeated, page)
+                    self.assertCountEqual(saved_rows.evaluate_all("els => els.map(el => el.dataset.objectId)"), expected_ids)
+                page.locator(".object-button.is-active").scroll_into_view_if_needed()
+                self.assert_no_overflow(page)
+                page.screenshot(path=str(SCREENSHOTS / f"pul-{'mobile' if mobile else 'desktop'}-objects.png"), full_page=True)
+                page.locator("#layers-tab").click()
+                page.locator("#no-types").click()
+                page.locator(f'[data-type="{repeated["properties"]["type"]}"]').check()
+                page.locator("#objects-tab").click()
+                self.assert_active_object(None, page)
+                filtered_ids = expected_ids & {f["properties"]["id"] for f in self.features["rozplan"]
+                                               if f["properties"]["type"] == repeated["properties"]["type"]}
+                self.assertCountEqual(saved_rows.evaluate_all("els => els.map(el => el.dataset.objectId)"), filtered_ids)
+                page.locator(f'.object-button[data-object-id="{repeated["properties"]["id"]}"]').click()
+                self.assert_active_object(repeated, page)
+                page.locator("#layers-tab").click()
+                page.locator("#all-types").click()
+                page.locator("#list-tab").click()
+                card = page.locator(".entry").filter(has=page.get_by_text(pretty(repeated["properties"]["address"]), exact=True))
+                card.get_by_text("Usu\u0144", exact=True).click()
+                self.wait_saved([{"id": self.matched_bdl["properties"]["id"]}], page, exact_count=True)
+                page.locator("#objects-tab").click()
+                for feature in self.repeated_plan:
+                    expect(page.locator(f'.object-button[data-object-id="{feature["properties"]["id"]}"]')).not_to_have_class(re.compile(r"\bis-saved\b"))
+                self.assert_active_object(None, page)
+                before = self.saved(page)
+                self.confirm_clear(False, page)
+                self.assertEqual(self.saved(page), before)
+                page.locator("#objects-tab").click()
+                remaining = {f["properties"]["id"] for f in self.features["rozplan"]
+                             if address_key(f["properties"]["address"]) == address_key(self.matched_bdl["properties"]["address"])}
+                self.assertCountEqual(saved_rows.evaluate_all("els => els.map(el => el.dataset.objectId)"), remaining)
+                self.confirm_clear(True, page)
+                page.locator("#objects-tab").click()
+                expect(saved_rows).to_have_count(0)
+                expect(page.locator(".object-saved:visible")).to_have_count(0)
+                page.reload()
+                self.wait_ready(page)
+                page.locator("#objects-tab").click()
+                expect(saved_rows).to_have_count(0)
+
     def test_actual_overlap_separate_sources_and_explicit_choice(self):
         """SEL-01/03/04, INFO-01, PLAN-01/03, LIST-04: no inferred join."""
         self.click_point()
@@ -342,8 +567,16 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(detail.locator("dd").all_text_contents(), [
             f"{self.plan['properties']['areaHa']:.2f}".replace(".", ",") + " ha",
             self.plan["properties"]["type"], f"{self.plan['properties']['percent']:g}%",
-            self.plan["properties"]["original"],
         ])
+        expect(detail).not_to_contain_text("Oznaczenie \u017ar\u00f3d\u0142owe")
+        self.assertEqual(self.page.evaluate("""() => {
+          let original;
+          __testMap.eachLayer(layer => {
+            if (layer instanceof L.GeoJSON && layer.options.style?.color === '#102bff')
+              original = layer.getLayers()[0].feature.properties.original;
+          });
+          return original;
+        }"""), self.plan["properties"]["original"])
         detail.locator(".primary").click()
         self.wait_saved([{"source": "rozplan"}], exact_count=True)
         stored = json.loads(self.saved())["entries"]
@@ -356,6 +589,227 @@ class BrowserTests(unittest.TestCase):
         self.wait_saved([{"source": "bdl"}, {"source": "rozplan"}], exact_count=True)
         self.assertEqual({e["address"] for e in json.loads(self.saved())["entries"]},
                          {self.bdl["properties"]["address"], self.plan["properties"]["address"]})
+
+    def load_entries(self, features, notes, page):
+        entries = [{"source": f["properties"]["source"], "id": f["properties"]["id"],
+                    "address": f["properties"]["address"],
+                    "key": address_key(f["properties"]["address"]), "note": note}
+                   for f, note in zip(features, notes)]
+        raw = json.dumps({"schema": 1, "version": self.manifest["version"], "entries": entries})
+        page.evaluate("([key, raw]) => localStorage.setItem(key, raw)", [STORAGE_KEY, raw])
+        page.reload()
+        self.wait_ready(page)
+        expect(page.locator(".entry")).to_have_count(len(entries))
+        return entries
+
+    def assert_active_note(self, feature, page):
+        active = page.locator('.entry.is-active')
+        current = page.locator('.entry[aria-current="true"]')
+        expect(active).to_have_count(0 if feature is None else 1)
+        expect(current).to_have_count(0 if feature is None else 1)
+        if feature is not None:
+            expect(active).to_have_attribute("data-address-key", address_key(feature["properties"]["address"]))
+            expect(active).to_have_attribute("aria-current", "true")
+
+    def viewport_state(self, page):
+        return page.evaluate("""() => {
+          const r = document.querySelector('#map').getBoundingClientRect();
+          return [scrollX, scrollY, r.x, r.y, r.width, r.height];
+        }""")
+
+    def assert_sidebar_reveals_active(self, selector, page):
+        bounds = page.locator(selector).evaluate("""el => {
+          const r = el.getBoundingClientRect();
+          const sidebar = document.querySelector('#sidebar');
+          const s = sidebar.getBoundingClientRect();
+          const tabs = document.querySelector('.tabs').getBoundingClientRect();
+          return {top: r.top, bottom: r.bottom, height: r.height,
+                  visibleTop: tabs.bottom, visibleBottom: s.bottom,
+                  scroll: sidebar.scrollTop};
+        }""")
+        self.assertGreater(bounds["scroll"], 0, bounds)
+        self.assertGreaterEqual(bounds["top"], bounds["visibleTop"], bounds)
+        self.assertLess(bounds["top"], bounds["visibleBottom"] - 30, bounds)
+        if bounds["height"] <= bounds["visibleBottom"] - bounds["visibleTop"] - 16:
+            self.assertLessEqual(bounds["bottom"], bounds["visibleBottom"], bounds)
+
+    def test_map_selection_syncs_notes_objects_and_sidebar_without_switching_tabs(self):
+        """SEL-06: real map choices, BDL provenance, sticky tabs and local scrolling."""
+        bdl_by_key = {address_key(f["properties"]["address"]): f for f in self.features["bdl"]}
+        # A late address forces the object list to scroll instead of passing at its top.
+        plan = sorted((f for f in self.features["rozplan"]
+                       if address_key(f["properties"]["address"]) in bdl_by_key),
+                      key=lambda f: [int(p) if p.isdigit() else p for p in
+                                     re.split(r"(\d+)", address_key(f["properties"]["address"]))])[-1]
+        bdl = bdl_by_key[address_key(plan["properties"]["address"])]
+        fillers = [f for f in self.features["bdl"]
+                   if address_key(f["properties"]["address"]) != address_key(bdl["properties"]["address"])][:24]
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                self.load_entries(fillers + [bdl], ["Filler"] * len(fillers) + ["BDL saved note"], page)
+                before = self.saved(page)
+                for tab in ("layers", "objects", "list"):
+                    page.locator(f"#{tab}-tab").click()
+                    page.locator("#sidebar").evaluate("el => el.scrollTop = 0")
+                    self.click_point(shape(plan["geometry"]).representative_point(), page)
+                    baseline = self.viewport_state(page)
+                    self.choose(plan, page)
+                    expect(page.locator(f"#{tab}-tab")).to_have_attribute("aria-pressed", "true")
+                    self.assert_active_object(plan, page)
+                    self.assert_active_note(bdl, page)
+                    expect(page.locator(".detail-view textarea")).to_have_value("BDL saved note")
+                    self.assertEqual(self.viewport_state(page), baseline)
+                    if tab != "layers":
+                        self.assert_sidebar_reveals_active(
+                            ".object-button.is-active" if tab == "objects" else ".entry.is-active", page)
+                    # Switching tabs must reveal the already active card, not require another click.
+                    for reveal in ("objects", "list"):
+                        page.locator(f"#{reveal}-tab").click()
+                        self.assert_sidebar_reveals_active(
+                            ".object-button.is-active" if reveal == "objects" else ".entry.is-active", page)
+                        self.assertEqual(self.viewport_state(page), baseline)
+                    page.screenshot(path=str(SCREENSHOTS / f"pul-{'mobile' if mobile else 'desktop'}-active-notes.png"), full_page=True)
+                    self.click_point(shape(bdl["geometry"]).representative_point(), page)
+                    self.choose(bdl, page)
+                    self.assert_active_object(None, page)
+                    self.assert_active_note(bdl, page)
+                    expect(page.locator("#list-tab")).to_have_attribute("aria-pressed", "true")
+                    # Exercise Leaflet's close event independently of close-button hit testing.
+                    page.evaluate("__testMap.closePopup()")
+                    self.assert_active_object(None, page)
+                    self.assert_active_note(None, page)
+                    self.assertEqual(self.saved(page), before)
+                # A fresh multi-hit popup must not inherit or arbitrarily choose an active result.
+                self.click_point(page=page)
+                self.assertGreater(page.locator(".result-button").count(), 1)
+                self.assert_active_object(None, page)
+                self.assert_active_note(None, page)
+                self.choose(self.plan, page)
+                self.assert_active_object(self.plan, page)
+                self.assert_active_note(None, page)
+                # Unsaved address activation must not create a note implicitly.
+                self.assertEqual(self.saved(page), before)
+                self.click_point(shape({"type": "Point", "coordinates": [0, 0]}), page)
+                expect(page.locator(".leaflet-popup")).to_have_count(0)
+                self.assert_active_object(None, page)
+                self.assert_active_note(None, page)
+                self.assertEqual(self.saved(page), before)
+                self.confirm_clear(True, page)
+                self.assert_active_object(None, page)
+                self.assert_active_note(None, page)
+                self.click_point(page=page)
+                self.choose(self.plan, page)
+                self.assert_active_note(None, page)
+                expect(page.locator(".entry")).to_have_count(0)
+                page.locator(".detail-view .primary").click()
+                self.wait_saved([{"id": self.plan["properties"]["id"], "note": ""}], page, exact_count=True)
+                self.assert_active_note(self.plan, page)
+                self.assert_active_object(self.plan, page)
+                page.locator(".leaflet-popup-close-button").click()
+                self.assert_active_note(None, page)
+                self.assert_active_object(None, page)
+
+    def test_mobile_saved_bdl_popup_close_button_is_clickable(self):
+        """SEL-06: a saved BDL popup must close through its real visible close control."""
+        page = self.open_page(mobile=True)
+        bdl_by_key = {address_key(f["properties"]["address"]): f for f in self.features["bdl"]}
+        plan = sorted((f for f in self.features["rozplan"]
+                       if address_key(f["properties"]["address"]) in bdl_by_key),
+                      key=lambda f: [int(p) if p.isdigit() else p for p in
+                                     re.split(r"(\d+)", address_key(f["properties"]["address"]))])[-1]
+        bdl = bdl_by_key[address_key(plan["properties"]["address"])]
+        self.load_entries([bdl], ["BDL saved note"], page)
+        page.locator("#list-tab").click()
+        self.click_point(shape(bdl["geometry"]).representative_point(), page)
+        self.choose(bdl, page)
+        self.assert_active_note(bdl, page)
+        page.screenshot(path=str(SCREENSHOTS / "pul-mobile-bdl-close-overlap.png"), full_page=True)
+        page.locator(".leaflet-popup-close-button").click(timeout=2000)
+        expect(page.locator(".leaflet-popup")).to_have_count(0)
+        self.assert_active_note(None, page)
+        self.assert_active_object(None, page)
+
+    def assert_markdown_download(self, entries, page):
+        expected = "# Uwagi do PUL Dojlidy 2027-2037\n\n" + "".join(
+            f"## {pretty(e['address'])}\n\n{e['note'] if e['note'].strip() else 'Brak notatki.'}\n\n"
+            for e in entries)
+        before = self.saved(page)
+        self.assertEqual(page.evaluate("entries => PulCore.toMarkdown(entries)", entries), expected)
+        self.assertEqual(page.evaluate("entries => { const before = JSON.stringify(entries); PulCore.toMarkdown(entries); return JSON.stringify(entries) === before; }", entries), True)
+        page.locator("#list-tab").click()
+        expect(page.locator("#export-markdown")).to_be_enabled()
+        page.wait_for_load_state("networkidle")
+        requests = []
+        listener = lambda request: requests.append(request.url)
+        page.on("request", listener)
+        page.evaluate("""() => {
+          const original = URL.createObjectURL;
+          URL.createObjectURL = function(blob) {
+            window.__testExportType = blob.type;
+            return original.call(this, blob);
+          };
+        }""")
+        try:
+            with page.expect_download() as pending:
+                page.locator("#export-markdown").click()
+            download = pending.value
+            self.assertEqual(download.suggested_filename, "uwagi-pul-dojlidy.md")
+            self.assertTrue(download.url.startswith("blob:"), download.url)
+            self.assertIsNone(download.failure())
+            self.assertEqual(Path(download.path()).read_bytes(), expected.encode("utf-8"))
+            self.assertEqual(page.evaluate("window.__testExportType"), "text/markdown;charset=utf-8")
+            page.wait_for_load_state("networkidle")
+            self.assertEqual(requests, [], "Export must not make local or outbound HTTP requests")
+            self.assertEqual(self.saved(page), before)
+            self.assertEqual(page.locator(".entry textarea").evaluate_all("els => els.map(el => el.value)"),
+                             [e["note"] for e in entries])
+        finally:
+            page.remove_listener("request", listener)
+
+    def test_markdown_download_all_entries_raw_notes_empty_reload_and_removal(self):
+        """Markdown export: bytes, insertion order, hidden data, blank and raw Unicode notes."""
+        for mobile in (False, True):
+            with self.subTest(mobile=mobile):
+                page = self.open_page(mobile=True) if mobile else self.page
+                page.locator("#list-tab").click()
+                expect(page.locator("#export-markdown")).to_be_disabled()
+                features = [self.plan, self.bdl, self.matched_bdl]
+                self.assertEqual(len({address_key(f["properties"]["address"]) for f in features}), 3)
+                notes = ["  # Za\u017c\u00f3\u0142\u0107 **g\u0119\u015bl\u0105**\n\n- [link](https://example.invalid)\n`kod` <tag> & | \\\nKoniec  \n", " \t\n  ", ""]
+                entries = self.load_entries(features, notes, page)
+                page.locator("#no-types").click()
+                page.locator("#bdl-visible").uncheck()
+                self.assert_markdown_download(entries, page)
+                page.reload()
+                self.wait_ready(page)
+                self.assert_markdown_download(entries, page)
+                for remaining in (2, 1, 0):
+                    page.locator(".entry").first.get_by_role("button", name="Usu\u0144", exact=True).click()
+                    self.wait_saved(entries[3 - remaining:], page, exact_count=True)
+                    if remaining:
+                        expect(page.locator("#export-markdown")).to_be_enabled()
+                    else:
+                        expect(page.locator("#export-markdown")).to_be_disabled()
+                page.reload()
+                self.wait_ready(page)
+                page.locator("#list-tab").click()
+                expect(page.locator("#export-markdown")).to_be_disabled()
+
+    def test_markdown_export_recovers_in_memory_notes_when_storage_conflicts(self):
+        """Export stays available during SAVE-01 conflict without touching newer storage."""
+        entries = self.load_entries([self.plan], ["Local recovery\n**keep me**"], self.page)
+        newer = self.page.context.new_page()
+        newer.on("pageerror", lambda error: self.errors.append(str(error)))
+        newer.goto(self.url)
+        self.wait_ready(newer)
+        newer.locator("#list-tab").click()
+        newer.locator(".entry textarea").fill("Newer persisted note")
+        latest = self.wait_saved([{"note": "Newer persisted note"}], newer)
+        expect(self.page.locator("#warnings")).to_contain_text("Lista zmieni\u0142a si\u0119 w innej karcie")
+        expect(self.page.locator(".entry textarea")).to_be_disabled()
+        self.assert_markdown_download(entries, self.page)
+        self.assertEqual(self.saved(), latest)
 
     def test_duplicate_address_note_edit_clear_and_reload(self):
         """LIST-01/04, NOTE-01, SAVE-01: exact address and persisted notes."""
@@ -579,6 +1033,10 @@ class BrowserTests(unittest.TestCase):
         exported = page.evaluate("PulCore.typeFamilies")
         self.assertEqual([f["code"] for f in exported], ["I", "II", "III", "IV", "V"])
         palette = {f["code"]: f["color"] for f in exported}
+        self.assertEqual(palette, {
+            "I": "#c6323e", "II": "#c7a4dc", "III": "#a878c3",
+            "IV": "#8651a6", "V": "#5c2e7e",
+        })
         self.assertEqual(len(set(palette.values())), 5)
         expect(page.locator("#color-mode")).to_have_value("percent")
         expect(page.locator("#plan-legend .legend-ticks span")).to_have_text(["0%", "25%", "50%", "75%", "100%"])

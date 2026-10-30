@@ -19,7 +19,7 @@
   </header>
   <main>
     <aside id="sidebar" aria-label="Warstwy i lista adresów">
-      <nav class="tabs" aria-label="Panele"><button id="layers-tab" aria-pressed="true" aria-controls="layers-panel">Warstwy</button><button id="list-tab" aria-pressed="false" aria-controls="list-panel">Uwagi <span id="count">0</span></button></nav>
+      <nav class="tabs" aria-label="Panele"><button id="layers-tab" aria-pressed="true" aria-controls="layers-panel">Warstwy</button><button id="objects-tab" aria-pressed="false" aria-controls="objects-panel">Obiekty</button><button id="list-tab" aria-pressed="false" aria-controls="list-panel">Uwagi <span id="count">0</span></button></nav>
       <div id="warnings" role="alert" class="warnings" hidden></div>
       <section id="layers-panel">
         <fieldset><legend>01 / Podkład mapy</legend><div class="basemaps"><label><input type="radio" name="base" value="osm" checked> OpenStreetMap</label><label><input type="radio" name="base" value="ortho"> Ortofotomapa</label></div></fieldset>
@@ -45,7 +45,13 @@
           <p>Ortofotomapa: GUGiK / Geoportal.</p>
         </details>
       </section>
+      <section id="objects-panel" hidden aria-label="Obiekty BULIG">
+        <p id="objects-count" class="objects-count" role="status"></p>
+        <p id="objects-empty" class="empty" hidden></p>
+        <ul id="objects-list" class="objects-list"></ul>
+      </section>
       <section id="list-panel" hidden>
+        <button id="export-markdown" type="button" disabled>Eksportuj do Markdown</button>
         <div id="entries"></div>
         <button id="clear-list" class="danger" type="button">Wyczyść listę</button>
       </section>
