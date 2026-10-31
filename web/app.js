@@ -67,6 +67,8 @@
   let activeAddressKey = null;
   map.createPane('lozfsPane').style.zIndex = '410';
   map.getPane('lozfsPane').style.pointerEvents = 'none';
+  map.createPane('moratoriumPane').style.zIndex = '411';
+  map.getPane('moratoriumPane').style.pointerEvents = 'none';
   map.createPane('highlightPane').style.zIndex = '420';
   map.getPane('highlightPane').style.pointerEvents = 'none';
   const selected = L.geoJSON(null, {pane: 'highlightPane', interactive: false, style: {color: '#f4b526', weight: 4, fillOpacity: .05}}).addTo(map);
@@ -74,14 +76,14 @@
   const bdlLayer = L.geoJSON(bdl, {interactive: false, style: {color: '#345b46', weight: .8, fillOpacity: .025}}).addTo(map);
   const planLayer = L.geoJSON(null, {interactive: false, style: planStyle}).addTo(map);
   const boundaryLayer = L.geoJSON(boundary, {pane: 'highlightPane', interactive: false, style: {color: '#18392f', weight: 2.5, fill: false, dashArray: '8 6'}}).addTo(map);
-  const lozfs = L.layerGroup();
-  $('lozfs-visible').onchange = e => {
-    if (e.target.checked) lozfs.addTo(map); else map.removeLayer(lozfs);
-    $('lozfs-legend').hidden = !e.target.checked;
-  };
-  async function loadLozfs() {
+  async function loadHatchedOverlay(id, label, files, color, dashedFirst = false) {
+    const overlay = L.layerGroup();
+    $(`${id}-visible`).onchange = e => {
+      if (e.target.checked) overlay.addTo(map); else map.removeLayer(overlay);
+      $(`${id}-legend`).hidden = !e.target.checked;
+    };
     try {
-      const collections = await Promise.all(['lozfs-proposed.geojson', 'lozfs-established.geojson'].map(async name => {
+      const collections = await Promise.all(files.map(async name => {
         const response = await fetch(`layers/${name}`, {cache: 'no-cache'});
         if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
         const collection = await response.json();
@@ -89,22 +91,23 @@
         return collection;
       }));
       // An explicit SVG renderer keeps the hatch separate from the Canvas data layers.
-      const renderer = L.svg({pane: 'lozfsPane'}).addTo(map);
+      const pane = `${id}Pane`;
+      const renderer = L.svg({pane}).addTo(map);
       const ns = 'http://www.w3.org/2000/svg';
       const defs = document.createElementNS(ns, 'defs');
       const pattern = document.createElementNS(ns, 'pattern');
-      for (const [key, value] of Object.entries({id: 'lozfs-hatch', width: '8', height: '8', patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)'})) pattern.setAttribute(key, value);
+      for (const [key, value] of Object.entries({id: `${id}-hatch`, width: '8', height: '8', patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)'})) pattern.setAttribute(key, value);
       const line = document.createElementNS(ns, 'line');
-      for (const [key, value] of Object.entries({x1: '0', y1: '0', x2: '0', y2: '8', stroke: '#287a3c', 'stroke-width': '1.4', 'stroke-opacity': '0.8'})) line.setAttribute(key, value);
+      for (const [key, value] of Object.entries({x1: '0', y1: '0', x2: '0', y2: '8', stroke: color, 'stroke-width': '1.4', 'stroke-opacity': '0.8'})) line.setAttribute(key, value);
       pattern.append(line); defs.append(pattern);
-      map.getPane('lozfsPane').querySelector('svg').prepend(defs);
-      collections.forEach((collection, i) => lozfs.addLayer(L.geoJSON(collection, {
-        pane: 'lozfsPane', renderer, interactive: false,
-        style: {color: '#287a3c', weight: 1.6, opacity: .9, fillColor: 'url(#lozfs-hatch)', fillOpacity: 1, dashArray: i === 0 ? '6 4' : null},
+      map.getPane(pane).querySelector('svg').prepend(defs);
+      collections.forEach((collection, i) => overlay.addLayer(L.geoJSON(collection, {
+        pane, renderer, interactive: false,
+        style: {color, weight: 1.6, opacity: .9, fillColor: `url(#${id}-hatch)`, fillOpacity: 1, dashArray: dashedFirst && i === 0 ? '6 4' : null},
       })));
-      $('lozfs-visible').disabled = false;
+      $(`${id}-visible`).disabled = false;
     } catch (error) {
-      warn('lozfs', `Nie udało się wczytać LoZFS: ${error.message}. Pozostałe warstwy i uwagi nadal działają.`);
+      warn(id, `Nie udało się wczytać ${label}: ${error.message}. Pozostałe warstwy i uwagi nadal działają.`);
     }
   }
   map.fitBounds(boundaryLayer.getBounds(), {padding: [20, 20]});
@@ -448,6 +451,7 @@
     }
   });
   renderList(); syncLayers(); renderLegend();
-  loadLozfs();
+  loadHatchedOverlay('lozfs', 'LoZFS', ['lozfs-proposed.geojson', 'lozfs-established.geojson'], '#287a3c', true);
+  loadHatchedOverlay('moratorium', 'Moratorium', ['moratorium.geojson'], '#246bc1');
   $('status').textContent = `${bdl.features.length} wydzieleń · ${rozplan.features.length} obiektów planu. Kliknij mapę, aby porównać źródła.`;
 })();
